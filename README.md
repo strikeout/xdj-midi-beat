@@ -261,6 +261,16 @@ This project depends on [rusty_link](https://github.com/anzbert/rusty_link) (a R
 
 ---
 
+## Thanks & Inspiration
+
+This project would not have been possible without the incredible reverse-engineering work and community tools provided by Deep Symmetry:
+- [Deep-Symmetry/beat-link-trigger](https://github.com/Deep-Symmetry/beat-link-trigger)
+- [Deep-Symmetry/dysentery](https://github.com/Deep-Symmetry/dysentery)
+
+Huge thanks to the creators for documenting the Pioneer Pro DJ Link protocol so thoroughly!
+
+---
+
 ## License
 
 MIT for the xdj-clock application code. See `vendor/rusty_link/link/LICENSE.md` for the Ableton Link license.
