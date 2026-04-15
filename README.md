@@ -16,9 +16,9 @@ Bridge between Pioneer CDJ/XDJ hardware (Pro DJ Link) or rekordbox Performance m
 - **MIDI CC** — continuous BPM coarse/fine, pitch, bar phase, beat phase, playing state, master deck number
 - **MIDI notes** — beat trigger (every beat) and downbeat trigger (beat 1 of every bar), with velocity accents
 - **Two source modes:**
-- **Pro DJ Link** — listens on the Ethernet network for CDJ-3000 / XDJ-AZ / XDJ-XZ absolute-position packets (~30 ms) and beat packets; works with any Pioneer standalone hardware
-  - **Ableton Link** — joins the Link session broadcast by rekordbox (Performance mode / USB controller) or any other Link-capable software; polls at ~500 µs for sub-millisecond timing
-- **Auto Discovery** — Ableton Link when peers are detected, falls back to Pro DJ Link with automatic network interface selection
+  - 1. **Pro DJ Link** — listens on the Ethernet network for CDJ-3000 / XDJ-AZ / XDJ-XZ absolute-position packets (~30 ms) and beat packets; works with any Pioneer standalone hardware
+  - 2. **Ableton Link** — joins the Link session broadcast by rekordbox (Performance mode / USB controller) or any other Link-capable software; polls at ~500 µs for sub-millisecond timing
+- **Network auto discovery** — tries to discover and select the correct network interface automatically
 - **TOML config file** — all MIDI channel, note, and CC numbers are fully remappable
 - **CLI overrides** — interface, MIDI port, source, device number, log level
 - **Terminal UI (TUI)** — real-time dashboard with input devices, BPM/phase, MIDI output status, interactive port selection, and a scrolling log panel (powered by [ratatui](https://ratatui.rs))
