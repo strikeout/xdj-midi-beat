@@ -1,0 +1,4 @@
+/target
+/vendor
+.DS_Store
+*.log

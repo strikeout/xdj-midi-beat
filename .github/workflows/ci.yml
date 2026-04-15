@@ -1,0 +1,161 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTY_LINK_VERSION: "0.2.3"
+
+jobs:
+  # ── Tests (Linux) ────────────────────────────────────────────────────────────
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y cmake build-essential libasound2-dev pkg-config
+
+      - name: Restore vendored rusty_link
+        id: vendor-cache
+        uses: actions/cache@v4
+        with:
+          path: vendor/rusty_link
+          key: rusty-link-${{ env.RUSTY_LINK_VERSION }}-${{ runner.os }}
+
+      - name: Download vendored rusty_link
+        if: steps.vendor-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p vendor
+          curl --fail --silent --show-error --location \
+            --retry 3 --retry-delay 5 \
+            -H "User-Agent: xdj-clock-ci/1.0" \
+            "https://static.crates.io/crates/rusty_link/rusty_link-$RUSTY_LINK_VERSION.crate" \
+            -o "$RUNNER_TEMP/rusty_link.tar.gz"
+          tar xzf "$RUNNER_TEMP/rusty_link.tar.gz" -C vendor
+          mv "vendor/rusty_link-$RUSTY_LINK_VERSION" vendor/rusty_link
+
+      - name: Verify vendored rusty_link
+        run: |
+          if [ ! -f vendor/rusty_link/Cargo.toml ]; then
+            echo "::error::vendor/rusty_link/Cargo.toml not found — download or cache is broken"
+            ls -la vendor/ || true
+            exit 1
+          fi
+          echo "vendor/rusty_link OK"
+
+      - name: Patch vendored build.rs for static linking
+        run: |
+          cp .github/vendor-patches/build.rs vendor/rusty_link/build.rs
+          cp .github/vendor-patches/link_bindings.rs vendor/rusty_link/link_bindings.rs
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry & build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run tests
+        run: cargo test --locked
+
+  # ── Build checks (Windows + macOS) ──────────────────────────────────────────
+  build:
+    name: Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install CMake (macOS)
+        if: runner.os == 'macOS'
+        run: brew install cmake || true
+
+      - name: Restore vendored rusty_link
+        id: vendor-cache
+        uses: actions/cache@v4
+        with:
+          path: vendor/rusty_link
+          key: rusty-link-${{ env.RUSTY_LINK_VERSION }}-${{ runner.os }}
+
+      - name: Download vendored rusty_link (Unix)
+        if: steps.vendor-cache.outputs.cache-hit != 'true' && runner.os != 'Windows'
+        run: |
+          mkdir -p vendor
+          curl --fail --silent --show-error --location \
+            --retry 3 --retry-delay 5 \
+            -H "User-Agent: xdj-clock-ci/1.0" \
+            "https://static.crates.io/crates/rusty_link/rusty_link-$RUSTY_LINK_VERSION.crate" \
+            -o "$RUNNER_TEMP/rusty_link.tar.gz"
+          tar xzf "$RUNNER_TEMP/rusty_link.tar.gz" -C vendor
+          mv "vendor/rusty_link-$RUSTY_LINK_VERSION" vendor/rusty_link
+
+      - name: Download vendored rusty_link (Windows)
+        if: steps.vendor-cache.outputs.cache-hit != 'true' && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force vendor | Out-Null
+          $url = "https://static.crates.io/crates/rusty_link/rusty_link-$env:RUSTY_LINK_VERSION.crate"
+          $tmp = "$env:RUNNER_TEMP\rusty_link.tar.gz"
+          curl.exe --fail --show-error --location --retry 3 --retry-delay 5 -H "User-Agent: xdj-clock-ci/1.0" "$url" -o "$tmp"
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "curl.exe failed with exit code $LASTEXITCODE"
+            exit 1
+          }
+          if (!(Test-Path "$tmp") -or (Get-Item "$tmp").Length -lt 1024) {
+            Write-Error "Downloaded file is missing or suspiciously small"
+            exit 1
+          }
+          tar.exe xzf "$tmp" -C vendor
+          Rename-Item "vendor\rusty_link-$env:RUSTY_LINK_VERSION" "rusty_link"
+
+      - name: Verify vendored rusty_link (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          if [ ! -f vendor/rusty_link/Cargo.toml ]; then
+            echo "::error::vendor/rusty_link/Cargo.toml not found — download or cache is broken"
+            ls -la vendor/ || true
+            exit 1
+          fi
+          echo "vendor/rusty_link OK"
+
+      - name: Verify vendored rusty_link (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (!(Test-Path "vendor\rusty_link\Cargo.toml")) {
+            Write-Error "vendor\rusty_link\Cargo.toml not found — download or cache is broken"
+            Get-ChildItem vendor -ErrorAction SilentlyContinue
+            exit 1
+          }
+          Write-Host "vendor/rusty_link OK"
+
+      - name: Patch vendored build.rs for static linking
+        if: runner.os != 'Windows'
+        run: |
+          cp .github/vendor-patches/build.rs vendor/rusty_link/build.rs
+          cp .github/vendor-patches/link_bindings.rs vendor/rusty_link/link_bindings.rs
+
+      - name: Patch vendored build.rs for static linking (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Copy-Item ".github\vendor-patches\build.rs" "vendor\rusty_link\build.rs"
+          Copy-Item ".github\vendor-patches\link_bindings.rs" "vendor\rusty_link\link_bindings.rs"
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry & build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --release --locked

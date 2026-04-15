@@ -1,0 +1,281 @@
+//! MIDI Clock generator — 24 pulses-per-quarter-note.
+//!
+//! Generates MIDI Timing Clock (0xF8) messages at the correct rate for the
+//! current BPM, plus MIDI Start (0xFA), Stop (0xFC), and Continue (0xFB)
+//! messages when the master deck starts or stops.
+//!
+//! Uses deadline-based sleeping: computes the exact instant of the next pulse
+//! and sleeps until then (via `tokio::select!` with `sleep_until`), rather
+//! than polling at a fixed interval.  Beat events arriving mid-sleep wake
+//! the task immediately for phase correction.
+
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use midir::MidiOutputConnection;
+use parking_lot::Mutex;
+use tokio::sync::broadcast;
+
+use crate::config::SharedConfig;
+use crate::prolink::beat_listener::BeatEvent;
+use crate::state::SharedState;
+use crate::tui::state::MidiActivity;
+
+// ── MIDI byte constants ───────────────────────────────────────────────────────
+
+const MSG_CLOCK: u8 = 0xF8;
+const MSG_START: u8 = 0xFA;
+const MSG_CONTINUE: u8 = 0xFB;
+const MSG_STOP: u8 = 0xFC;
+
+/// Pulses per quarter note — MIDI spec, always 24.
+const PPQ: u64 = 24;
+
+// ── Clock state ───────────────────────────────────────────────────────────────
+
+struct ClockState {
+    /// Current inter-pulse interval in nanoseconds (derived from BPM).
+    interval_ns: u64,
+    /// Time we last sent a clock pulse.
+    last_pulse: Instant,
+    /// Current pulse index within the quarter note (0–23).
+    pulse_index: u64,
+    /// Whether we are currently in the "running" state.
+    running: bool,
+    /// Whether the clock has been started at least once (for Continue vs Start).
+    has_started: bool,
+    /// BPM at last update (used to detect changes).
+    last_bpm: f64,
+}
+
+impl ClockState {
+    fn new() -> Self {
+        Self {
+            interval_ns: bpm_to_interval_ns(120.0),
+            last_pulse: Instant::now(),
+            pulse_index: 0,
+            running: false,
+            has_started: false,
+            last_bpm: 0.0,
+        }
+    }
+
+    fn set_bpm(&mut self, bpm: f64) {
+        if bpm > 0.0 && (bpm - self.last_bpm).abs() > 0.01 {
+            self.interval_ns = bpm_to_interval_ns(bpm);
+            self.last_bpm = bpm;
+        }
+    }
+}
+
+fn bpm_to_interval_ns(bpm: f64) -> u64 {
+    // interval = 60s / (bpm * PPQ) converted to nanoseconds
+    let ns = 60.0e9 / (bpm * PPQ as f64);
+    ns.round() as u64
+}
+
+// ── Phase correction ──────────────────────────────────────────────────────────
+
+/// Maximum correction we will apply in one shot (1/4 of a pulse interval).
+const MAX_CORRECTION_FRACTION: f64 = 0.25;
+
+/// When a beat arrives, compute how far off our clock is and nudge `last_pulse`
+/// to correct it.  We correct by at most MAX_CORRECTION_FRACTION of an
+/// interval to avoid audible jumps.
+fn apply_phase_correction(cs: &mut ClockState, beat_at: Instant) {
+    if cs.interval_ns == 0 {
+        return;
+    }
+    // Ideal: beat_at should land exactly on pulse_index == 0.
+    let elapsed_since_last = beat_at.saturating_duration_since(cs.last_pulse);
+    let elapsed_ns = elapsed_since_last.as_nanos() as u64;
+
+    // How many pulses should have elapsed?
+    let pulses_elapsed = elapsed_ns / cs.interval_ns;
+    // Remainder: how far past the last pulse boundary are we?
+    let remainder_ns = elapsed_ns % cs.interval_ns;
+
+    // We want remainder to be 0 (we are exactly at a pulse boundary).
+    // If remainder > interval/2 we are late; if < interval/2 we are early.
+    let interval = cs.interval_ns;
+    let max_corr = (interval as f64 * MAX_CORRECTION_FRACTION) as u64;
+
+    if remainder_ns > interval / 2 {
+        // Late: advance last_pulse forward by up to max_corr ns.
+        let correction = (remainder_ns - interval / 2).min(max_corr);
+        cs.last_pulse = beat_at - Duration::from_nanos(elapsed_ns - correction);
+    } else if remainder_ns > 0 && remainder_ns < interval / 2 {
+        // Early: push last_pulse back by up to max_corr ns.
+        let correction = remainder_ns.min(max_corr);
+        cs.last_pulse = beat_at - Duration::from_nanos(elapsed_ns + correction);
+    }
+
+    // Snap pulse_index to 0 at beat boundary.
+    let _ = pulses_elapsed; // already consumed above
+    cs.pulse_index = 0;
+}
+
+// ── Beat event handler ────────────────────────────────────────────────────────
+
+/// Process a single beat event, updating clock BPM and phase correction.
+fn handle_beat_event(cs: &mut ClockState, state: &SharedState, evt: BeatEvent) {
+    match evt {
+        BeatEvent::Beat(bp) => {
+            let master_num = state.read().master.device_number;
+            if bp.device_number == master_num || master_num == 0 {
+                cs.set_bpm(bp.effective_bpm);
+                apply_phase_correction(cs, Instant::now());
+            }
+        }
+        BeatEvent::AbsPosition(ap) => {
+            let master_num = state.read().master.device_number;
+            if ap.device_number == master_num || master_num == 0 {
+                cs.set_bpm(ap.effective_bpm);
+            }
+        }
+        BeatEvent::LinkBeat { bpm, .. } => {
+            cs.set_bpm(bpm);
+            apply_phase_correction(cs, Instant::now());
+        }
+    }
+}
+
+/// Drain all queued beat events without blocking.
+fn drain_beat_events(
+    cs: &mut ClockState,
+    state: &SharedState,
+    beat_rx: &mut broadcast::Receiver<BeatEvent>,
+) {
+    loop {
+        match beat_rx.try_recv() {
+            Ok(evt) => handle_beat_event(cs, state, evt),
+            Err(_) => break,
+        }
+    }
+}
+
+// ── Main clock task ───────────────────────────────────────────────────────────
+
+pub async fn run(
+    conn: Arc<Mutex<Option<MidiOutputConnection>>>,
+    state: SharedState,
+    mut beat_rx: broadcast::Receiver<BeatEvent>,
+    cfg: SharedConfig,
+    activity: Arc<Mutex<MidiActivity>>,
+) {
+    let mut cs = ClockState::new();
+    let mut clock_enabled = cfg.read().midi.clock_enabled;
+
+    tracing::info!("MIDI clock task started");
+    if !clock_enabled {
+        tracing::info!("MIDI clock disabled in config");
+    }
+
+    loop {
+        let current_enabled = cfg.read().midi.clock_enabled;
+        if current_enabled != clock_enabled {
+            clock_enabled = current_enabled;
+            if !clock_enabled {
+                if cs.running {
+                    cs.running = false;
+                    cs.has_started = false;
+                    let mut c = conn.lock();
+                    if let Some(ref mut c) = *c {
+                        let _ = c.send(&[MSG_STOP]);
+                    }
+                    tracing::info!("MIDI clock disabled at runtime");
+                }
+            } else {
+                tracing::info!("MIDI clock enabled at runtime");
+                cs.last_pulse = Instant::now();
+            }
+        }
+
+        // ── Compute next pulse deadline ──────────────────────────────────────
+        let latency_offset_ms = cfg.read().midi.latency_compensation_ms;
+        let next_pulse_at = if clock_enabled && cs.running && cs.interval_ns > 0 {
+            let base = cs.last_pulse + Duration::from_nanos(cs.interval_ns);
+            if latency_offset_ms > 0 {
+                base + Duration::from_millis(latency_offset_ms as u64)
+            } else if latency_offset_ms < 0 {
+                base.checked_sub(Duration::from_millis((-latency_offset_ms) as u64))
+                    .unwrap_or(base)
+            } else {
+                base
+            }
+        } else {
+            // Not running: wake periodically to check state changes.
+            Instant::now() + Duration::from_millis(10)
+        };
+        let sleep_dur = next_pulse_at.saturating_duration_since(Instant::now());
+        let deadline = tokio::time::Instant::now() + sleep_dur;
+
+        // ── Wait for next pulse deadline OR a beat event ─────────────────────
+        tokio::select! {
+            _ = tokio::time::sleep_until(deadline) => {}
+            evt = beat_rx.recv() => {
+                match evt {
+                    Ok(evt) => {
+                        handle_beat_event(&mut cs, &state, evt);
+                        drain_beat_events(&mut cs, &state, &mut beat_rx);
+                    }
+                    Err(broadcast::error::RecvError::Closed) => return,
+                    Err(broadcast::error::RecvError::Lagged(_)) => {}
+                }
+            }
+        }
+
+        // ── Read master state ────────────────────────────────────────────────
+        let (bpm, is_playing) = {
+            let st = state.read();
+            (st.master.bpm, st.master.is_playing)
+        };
+
+        // ── Start / Stop / Continue messages ─────────────────────────────────
+        if clock_enabled && is_playing && !cs.running {
+            cs.running = true;
+            cs.pulse_index = 0;
+            cs.last_pulse = Instant::now();
+            if bpm > 0.0 {
+                cs.set_bpm(bpm);
+            }
+            let msg = if cs.has_started { MSG_CONTINUE } else { MSG_START };
+            cs.has_started = true;
+            {
+                let mut c = conn.lock();
+                if let Some(ref mut c) = *c {
+                    // Send Start/Continue followed by the first clock pulse
+                    // immediately (MIDI spec: clock should follow Start without delay).
+                    let _ = c.send(&[msg]);
+                    let _ = c.send(&[MSG_CLOCK]);
+                }
+            }
+            activity.lock().clock_pulses += 1;
+            tracing::debug!(msg = if msg == MSG_START { "Start" } else { "Continue" }, "MIDI transport sent");
+        } else if (!clock_enabled || !is_playing) && cs.running {
+            cs.running = false;
+            let mut c = conn.lock();
+            if let Some(ref mut c) = *c {
+                let _ = c.send(&[MSG_STOP]);
+            }
+            tracing::debug!("MIDI Stop sent");
+        }
+
+        // ── Emit clock pulse if deadline reached ─────────────────────────────
+        if clock_enabled && cs.running && bpm > 0.0 {
+            cs.set_bpm(bpm);
+            let now = Instant::now();
+            let elapsed = now.duration_since(cs.last_pulse).as_nanos() as u64;
+            if elapsed >= cs.interval_ns {
+                let overshoot = elapsed - cs.interval_ns;
+                cs.last_pulse = now - Duration::from_nanos(overshoot.min(cs.interval_ns / 2));
+                cs.pulse_index = (cs.pulse_index + 1) % PPQ;
+                let mut c = conn.lock();
+                if let Some(ref mut c) = *c {
+                    let _ = c.send(&[MSG_CLOCK]);
+                }
+                activity.lock().clock_pulses += 1;
+            }
+        }
+    }
+}

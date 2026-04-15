@@ -1,0 +1,99 @@
+# Place next to the binary or pass --config <path> on the command line.
+
+# Beat/tempo source selection.
+#   "auto"    — prefer Ableton Link when peers are detected, else Pro DJ Link
+#   "link"    — Ableton Link only (for rekordbox Performance mode / USB controllers)
+#   "prolink" — Pro DJ Link only (for standalone CDJ/XDJ hardware on Ethernet)
+source = "prolink"
+
+# Network interface to use for Pro DJ Link communication.
+# "auto" = pick the first non-loopback interface that has an IPv4 address.
+# Set to an interface name (e.g. "Ethernet", "en0", "eth0") if auto-detection
+# picks the wrong adapter.
+interface = "auto"
+
+# Virtual CDJ device number advertised on the Pro DJ Link network.
+# 1–4 are standard CDJ slots; 5–6 are CDJ-3000 extended slots; 7+ are safe
+# "observer" numbers that never conflict with real hardware.
+# Use 1–6 only if you need dbserver metadata queries and have fewer than 4
+# (or 6) real CDJs connected.
+device_number = 5
+
+# Name broadcast on the network (max 16 bytes, ASCII).
+device_name = "xdj-clock"
+
+# ── Ableton Link ─────────────────────────────────────────────────────────────
+
+[link]
+# Enable Ableton Link session participation.  When enabled, xdj-clock will
+# appear in the Link session (e.g. visible in rekordbox's Link status panel).
+enabled = true
+
+# Beat quantum — number of beats per bar/loop cycle.
+# 4 = 4/4 time (default).  Phase is expressed as a value in [0, quantum).
+quantum = 4.0
+
+# Polling interval in microseconds for reading the Link timeline.
+# 500µs = ~2000 reads/sec.  Lower = tighter timing; higher = less CPU.
+poll_interval_us = 500
+
+# ── MIDI output ──────────────────────────────────────────────────────────────
+
+[midi]
+# MIDI output port name (substring match, case-insensitive).
+# "auto" = use the first available output port.
+# Example: "IAC Driver Bus 1", "loopMIDI Port", "Microsoft GS Wavetable Synth"
+output = "auto"
+
+# Enable 24-PPQ MIDI clock output (Start / Stop / Continue + 0xF8 pulses).
+clock_enabled = true
+
+# BPM smoothing window in milliseconds.  Larger = less jitter but slower
+# response to pitch-fader changes.  0 = no smoothing.
+smoothing_ms = 30
+
+latency_compensation_ms = 0
+
+# ── MIDI Note mapping ────────────────────────────────────────────────────────
+
+[midi.notes]
+# MIDI channel for note messages (0-indexed, so 0 = channel 1).
+channel = 10   # channel 10 — traditional drum/trigger channel
+
+# Note fired on *every* beat (all four beats of the bar).
+# Velocity 127 on beat 1 (downbeat), 80 on beats 2/4, 64 on beat 3.
+beat = 36     # C1 — kick drum in GM
+
+# Note fired on beat 1 of every bar only (downbeat / 1-beat).
+downbeat = 37 # C#1
+
+# ── MIDI CC mapping ──────────────────────────────────────────────────────────
+
+[midi.cc]
+# MIDI channel for CC messages (0-indexed).
+channel = 0   # channel 1
+
+# BPM coarse (integer part mapped to 0-127, range 60–187 BPM).
+# Value = clamp((bpm - 60) * 127 / 127, 0, 127)
+bpm_coarse = 1
+
+# BPM fine (fractional .00 part, 0-127 = 0.00–0.99 BPM).
+bpm_fine = 33
+
+# Pitch fader position (-10%..+10% → 0..127, centre = 64).
+pitch = 2
+
+# Phase within bar (0.0–1.0 maps to 0–127; resets on each downbeat).
+bar_phase = 3
+
+# Phase within beat (0.0–1.0 maps to 0–127; resets each beat using
+# absolute-position packets from CDJ-3000).
+beat_phase = 4
+
+# Master deck playing state: 0 = stopped/paused, 127 = playing.
+playing = 5
+
+# Which deck is tempo master (device number, 0 = none).
+master_deck = 1
+
+phrase_16 = 8
