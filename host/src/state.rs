@@ -280,7 +280,8 @@ pub struct DjState {
     /// Updated explicitly when `is_master` flags change, avoiding
     /// nondeterministic `HashMap::values().find()` iteration.
     master_device_num: u8,
-    prolink_seen: bool,
+    pub prolink_seen: bool,
+    pub link_peer_count: usize,
 }
 
 impl DjState {
@@ -295,6 +296,7 @@ impl DjState {
             bpm_smooth_window: window,
             master_device_num: 0,
             prolink_seen: false,
+            link_peer_count: 0,
         }
     }
 
@@ -618,12 +620,16 @@ impl DjState {
         is_playing: bool,
         beat_crossed: bool,
     ) {
-        // Only update if Link is the active source, or if no ProLink master
-        // is present (so Link can fill the silence).
+        // Priority logic for "Auto" source mode:
+        // 1. If we have active Link peers, Link ALWAYS takes priority.
+        // 2. If no Link peers, but we have a ProLink master, ProLink takes priority.
+        // 3. Otherwise, Link can fill the silence (e.g. if started first).
+
+        let has_link_peers = self.link_peer_count > 0;
         let prolink_active =
             self.master.source == Some(BeatSource::ProLink) && self.master.bpm > 0.0;
-        let cdjs_seen = self.prolink_seen;
-        if prolink_active || cdjs_seen {
+
+        if prolink_active && !has_link_peers {
             return;
         }
 
@@ -659,6 +665,18 @@ impl DjState {
     /// Record that at least one real Pro DJ Link device has been seen on the network.
     pub fn mark_prolink_seen(&mut self) {
         self.prolink_seen = true;
+    }
+
+    pub fn set_link_peer_count(&mut self, count: usize) {
+        if self.link_peer_count != count {
+            tracing::info!(
+                old = self.link_peer_count,
+                new = count,
+                "Ableton Link peer count changed"
+            );
+        }
+        self.link_peer_count = count;
+        self.refresh_master();
     }
 
     /// Set track metadata received from a dbserver query.

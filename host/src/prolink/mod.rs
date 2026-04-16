@@ -2,6 +2,7 @@
 
 pub mod discovery;
 pub mod packets;
+pub mod builder;
 pub mod beat_listener;
 pub mod metadata;
 pub mod status_listener;
@@ -103,4 +104,18 @@ pub fn hex_preview(data: &[u8], n: usize) -> String {
         .map(|b| format!("{:02x}", b))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+#[allow(dead_code)]
+pub fn create_reuse_socket(port: u16) -> anyhow::Result<std::net::UdpSocket> {
+    use socket2::{Domain, Protocol, Socket, Type};
+    use std::net::{Ipv4Addr, SocketAddrV4};
+
+    let raw = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
+    raw.set_reuse_address(true)?;
+    #[cfg(not(windows))]
+    raw.set_reuse_port(true)?;
+    raw.set_nonblocking(true)?;
+    raw.bind(&SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port).into())?;
+    Ok(std::net::UdpSocket::from(raw))
 }

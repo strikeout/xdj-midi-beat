@@ -666,6 +666,7 @@ async fn main() -> anyhow::Result<()> {
 
     // ── Network interface ────────────────────────────────────────────────────
     let (bind_ip, bcast_ip, mac) = detect_interface(&startup_cfg.interface)?;
+    tracing::info!(%bind_ip, %bcast_ip, "Network interface initialized");
 
     // ── MIDI output (swappable — Option so port can be changed at runtime) ───
     let midi_conn: Arc<Mutex<Option<MidiOutputConnection>>> =
@@ -702,7 +703,7 @@ async fn main() -> anyhow::Result<()> {
     //   Auto    — both; Link fills in when no Pro DJ Link master is present
 
     let use_prolink = startup_cfg.source != config::Source::Link;
-    let use_link    = startup_cfg.source != config::Source::ProLink;
+    let use_link = startup_cfg.source != config::Source::ProLink;
 
     // 1. Device discovery (Pro DJ Link)
     if use_prolink {
@@ -768,13 +769,14 @@ async fn main() -> anyhow::Result<()> {
 
     // 5. Ableton Link engine
     if use_link {
+        tracing::info!("Initializing Ableton Link session...");
+        let link = rusty_link::AblLink::new(120.0);
         let link_cfg = startup_cfg.link.clone();
         let link_state = Arc::clone(&dj_state);
         let link_beat_tx = beat_tx.clone();
         tokio::spawn(async move {
-            crate::link::run(link_cfg, link_state, link_beat_tx).await;
+            crate::link::run(link_cfg, link_state, link_beat_tx, link).await;
         });
-        tracing::info!("Ableton Link engine scheduled");
     }
 
     // 6. State appliers (always run — process events from whichever source fires)

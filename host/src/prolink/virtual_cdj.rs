@@ -13,10 +13,14 @@ use socket2::{Domain, Protocol, Socket, Type};
 use tokio::net::UdpSocket;
 use tokio::sync::broadcast;
 
+use super::builder::{
+    build_announce, build_claim1, build_claim2, build_claim_final, build_keepalive,
+    build_status_packet, pad_name,
+};
 use super::discovery::DeviceTable;
+use super::packets::has_magic;
 use super::{
-    MAGIC, PKT_ANNOUNCE, PKT_CDJ_STATUS, PKT_CLAIM1, PKT_CLAIM2, PKT_CLAIM_FINAL, PKT_CONFLICT,
-    PKT_KEEPALIVE, PORT_DISCOVERY, PORT_STATUS,
+    PKT_CONFLICT, PORT_DISCOVERY, PORT_STATUS,
 };
 
 // ── Timing constants ──────────────────────────────────────────────────────────
@@ -36,158 +40,6 @@ pub struct VirtualCdjReady {
     pub mac: [u8; 6],
 }
 
-// ── Packet builders ───────────────────────────────────────────────────────────
-
-fn pad_name(name: &str) -> [u8; 20] {
-    let mut buf = [0u8; 20];
-    let bytes = name.as_bytes();
-    let len = bytes.len().min(19); // leave room for null terminator
-    buf[..len].copy_from_slice(&bytes[..len]);
-    buf
-}
-
-/// Common keep-alive packet header (bytes 0x00 – 0x23).
-/// All keep-alive packet types share this layout:
-///   0x00-0x09: magic
-///   0x0a:      type
-///   0x0b:      padding
-///   0x0c-0x1f: model (20 bytes CString, null-padded)
-///   0x20:      u1 = 0x01
-///   0x21:      device_type (CDJ = 0x02)
-///   0x22:      padding
-///   0x23:      subtype
-fn write_keepalive_header(p: &mut [u8], pkt_type: u8, subtype: u8, name: &[u8; 20]) {
-    p[..10].copy_from_slice(&MAGIC);
-    p[0x0a] = pkt_type;
-    // 0x0b = 0x00 (padding, already zero)
-    p[0x0c..0x20].copy_from_slice(name);
-    p[0x20] = 0x01;       // u1
-    p[0x21] = 0x04;       // device_type: Rekordbox = 0x04
-    // 0x22 = 0x00 (padding)
-    p[0x23] = subtype;
-}
-
-// type_hello (0x0a), subtype 0x25.  Content: 1 byte (u2=1).
-fn build_announce(name: &[u8; 20]) -> [u8; 0x25] {
-    let mut p = [0u8; 0x25];
-    write_keepalive_header(&mut p, PKT_ANNOUNCE, 0x25, name);
-    p[0x24] = 0x01; // u2 (CDJs send 1, DJMs send 3)
-    p
-}
-
-// type_mac (0x00), subtype 0x2c.
-// Content: iteration(1) + flags(1) + mac(6) = 8 bytes.
-fn build_claim1(name: &[u8; 20], mac: &[u8; 6], n: u8) -> [u8; 0x2c] {
-    let mut p = [0u8; 0x2c];
-    write_keepalive_header(&mut p, PKT_CLAIM1, 0x2c, name);
-    p[0x24] = n;    // iteration (1..3)
-    p[0x25] = 0x01; // flags: is_player_or_mixer
-    p[0x26..0x2c].copy_from_slice(mac);
-    p
-}
-
-// type_ip (0x02), subtype 0x32.
-// Content: ip(4) + mac(6) + player_number(1) + iteration(1) + flags(1) + assignment(1) = 14 bytes.
-fn build_claim2(name: &[u8; 20], ip: &[u8; 4], mac: &[u8; 6], device_num: u8, n: u8) -> [u8; 0x32] {
-    let mut p = [0u8; 0x32];
-    write_keepalive_header(&mut p, PKT_CLAIM2, 0x32, name);
-    p[0x24..0x28].copy_from_slice(ip);
-    p[0x28..0x2e].copy_from_slice(mac);
-    p[0x2e] = device_num;
-    p[0x2f] = n;    // iteration (1..3)
-    p[0x30] = 0x01; // flags: is_player_or_mixer
-    p[0x31] = 0x01; // player_number_assignment: auto
-    p
-}
-
-// type_number (0x04), subtype 0x26.
-// Content: proposed_player_number(1) + iteration(1) = 2 bytes.
-fn build_claim_final(name: &[u8; 20], device_num: u8, n: u8) -> [u8; 0x26] {
-    let mut p = [0u8; 0x26];
-    write_keepalive_header(&mut p, PKT_CLAIM_FINAL, 0x26, name);
-    p[0x24] = device_num; // proposed_player_number
-    p[0x25] = n;          // iteration (1..3)
-    p
-}
-
-fn build_keepalive(
-    name: &[u8; 20],
-    device_num: u8,
-    mac: &[u8; 6],
-    ip: &[u8; 4],
-    _peers: u8,
-) -> [u8; 0x36] {
-    let mut p = [0u8; 0x36];
-    p[..10].copy_from_slice(&MAGIC);
-    p[0x0a] = PKT_KEEPALIVE;
-    // 0x0b = 0x00 (padding)
-    // 0x0c-0x1f: model name — 20 bytes, CString null-padded.
-    // Place the name starting at 0x0c (matching python-prodj-link layout).
-    let name_len = name.len().min(19); // leave room for null terminator within 20 bytes
-    p[0x0c..0x0c + name_len].copy_from_slice(&name[..name_len]);
-    // Bytes 0x0c+name_len through 0x1f are already zero (null padding).
-    p[0x20] = 0x01;       // u1 (constant)
-    p[0x21] = 0x04;       // device_type: Rekordbox = 0x04
-    // 0x22 = 0x00 (padding)
-    p[0x23] = 0x36;       // subtype: stype_status
-    // --- content for type_status ---
-    p[0x24] = device_num; // player_number
-    p[0x25] = 0x04;       // u2 (device_type: Rekordbox = 0x04)
-    p[0x26..0x2c].copy_from_slice(mac);
-    p[0x2c..0x30].copy_from_slice(ip);
-    p[0x30] = 0x01;       // device_count = 1 (matching prolink-go)
-    // 0x31-0x33 = 0x00 (padding, 3 bytes)
-    p[0x34] = 0x04;       // flags: is_player_or_mixer = 1 (device_type: Rekordbox = 0x04)
-    p[0x35] = 0x00;       // u4: 0x00 (matching prolink-go, drop CDJ-3000 flag)
-    p
-}
-
-/// Build a CDJ status packet (port 50002) to unicast to each real device.
-///
-/// This is a mostly-static template matching prolink-go's `getStatusPacket`.
-/// Real CDJs need to receive this before they will share detailed metadata
-/// (especially for unanalysed mp3 files) and to avoid "older firmware" warnings.
-///
-/// Notable bytes (from prolink-go comments):
-///   0x68 = 0x01 and 0x75 = 0x01  — required for CDJ mp3 metadata
-///   0xb6 = 0x01                   — avoids "older firmware" warning
-fn build_status_packet(name: &[u8; 20], device_num: u8) -> [u8; 0x11c] {
-    // Template from prolink-go's getStatusPacket, 284 bytes (0x11c).
-    #[rustfmt::skip]
-    let mut b: [u8; 0x11c] = [
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
-        0x03, 0x00, 0x00, 0xf8, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x04, 0x04, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x04, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x9c, 0xff, 0xfe, 0x00, 0x10, 0x00, 0x00,
-        0x7f, 0xff, 0xff, 0xff, 0x7f, 0xff, 0xff, 0xff, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff,
-        0xff, 0xff, 0xff, 0xff, 0x01, 0xff, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x10, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0f, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    ];
-    // Overlay the ProLink header (10 bytes at 0x00).
-    b[..10].copy_from_slice(&MAGIC);
-    // Byte 0x0a is already 0x0a (PKT_CDJ_STATUS) from the template.
-    debug_assert_eq!(b[0x0a], PKT_CDJ_STATUS);
-    // Device name at 0x0b (20 bytes, matching prolink-go).
-    b[0x0b..0x0b + 20].copy_from_slice(name);
-    // Device ID at 0x21 and 0x24 (prolink-go sets both).
-    b[0x21] = device_num;
-    b[0x24] = device_num;
-    // Firmware at 0x7c ("1.43", 4 bytes).
-    b[0x7c..0x80].copy_from_slice(b"1.43");
-    b
-}
-
 // ── Main task ─────────────────────────────────────────────────────────────────
 
 /// Run the virtual CDJ: claim a channel number, then broadcast keep-alive
@@ -204,8 +56,6 @@ pub async fn run(
     device_table: DeviceTable,
     ready_tx: broadcast::Sender<VirtualCdjReady>,
 ) -> anyhow::Result<()> {
-    use super::packets::has_magic;
-
     let ip: [u8; 4] = bind_ip.octets();
     let name = pad_name(device_name);
     let bcast_addr = SocketAddrV4::new(broadcast_ip, PORT_DISCOVERY);

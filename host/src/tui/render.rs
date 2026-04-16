@@ -269,6 +269,20 @@ fn draw_deck_panel(
 
     let mut lines: Vec<Line> = Vec::new();
     let mut phrase_gauges: Vec<(usize, f64, String)> = Vec::new();
+
+    if st.link_peer_count > 0 {
+        lines.push(Line::from(vec![
+            Span::raw("  Ableton Link: "),
+            Span::styled(
+                format!("{} peer(s) connected", st.link_peer_count),
+                Style::default()
+                    .fg(CLR_PLAYING)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]));
+        lines.push(Line::from(""));
+    }
+
     if devices.is_empty() && st.master.source != Some(crate::state::BeatSource::AbletonLink) {
         lines.push(Line::from(Span::styled(
             "  No devices on network",

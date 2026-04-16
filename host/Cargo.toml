@@ -1,0 +1,27 @@
+[package]
+name = "xdj-clock-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "xdj-clock"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "signal", "io-util"] }
+socket2 = "0.6"
+parking_lot = "0.12"
+midir = "0.10"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+network-interface = "2"
+ratatui = "0.30"
+crossterm = { version = "0.29", features = ["event-stream"] }
+tokio-stream = "0.1"
+
+rusty_link = "0.2"

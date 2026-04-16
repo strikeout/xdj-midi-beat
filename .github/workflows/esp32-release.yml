@@ -1,0 +1,84 @@
+name: ESP32 Release
+
+on:
+  push:
+    tags:
+      - 'esp32-v*'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-esp32-release:
+    name: Build ESP32 Release
+    runs-on: ubuntu-latest
+    container: espressif/idf:latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: riscv32imc-esp-elf
+
+      - name: Cache Cargo registry & build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Set up ESP32 build environment
+        run: |
+          . ${IDF_PATH}/export.sh
+          idf.py --version
+
+      - name: Build ESP32 firmware
+        run: |
+          . ${IDF_PATH}/export.sh
+          cd esp32
+          cargo build --release --locked
+
+      - name: Prepare release package
+        run: |
+          mkdir -p esp32-release
+          cp esp32/target/riscv32imc-esp-elf/release/xdj-clock-esp32 esp32-release/
+          cp esp32/sdkconfig esp32-release/ 2>/dev/null || true
+
+          . ${IDF_PATH}/export.sh
+          idf.py esptool export-sdkconfig 2>/dev/null || true
+          cp build/sdkconfig esp32-release/ 2>/dev/null || true
+
+          tar -czf esp32-firmware.tar.gz esp32-release/
+
+      - name: Upload firmware artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: esp32-firmware-${{ github.ref_name }}
+          path: esp32-firmware.tar.gz
+
+  release:
+    name: Create GitHub Release
+    needs: build-esp32-release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: List artifacts
+        run: ls -la artifacts/
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="${{ github.ref_name }}"
+          files=$(find artifacts -type f | tr '\n' ' ')
+          gh release create "$tag" \
+            --title "xdj-clock ESP32 $tag" \
+            --notes "ESP32 firmware release" \
+            $files

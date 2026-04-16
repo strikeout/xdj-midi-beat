@@ -4,7 +4,7 @@
 #   "auto"    — prefer Ableton Link when peers are detected, else Pro DJ Link
 #   "link"    — Ableton Link only (for rekordbox Performance mode / USB controllers)
 #   "prolink" — Pro DJ Link only (for standalone CDJ/XDJ hardware on Ethernet)
-source = "prolink"
+source = "auto"
 
 # Network interface to use for Pro DJ Link communication.
 # "auto" = pick the first non-loopback interface that has an IPv4 address.
