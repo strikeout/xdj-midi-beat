@@ -16,3 +16,4 @@ serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 embassy-sync = "0.8"
 embassy-time = "0.5"
+xdj-core-prolink = { path = "../crates/xdj-core-prolink", default-features = false }

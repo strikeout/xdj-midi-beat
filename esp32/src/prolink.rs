@@ -1,13 +1,10 @@
 use smoltcp::iface::{EthernetInterface, Interface, SocketStorage};
 use smoltcp::socket::UdpSocket;
 use smoltcp::wire::{EthernetAddress, IpAddress, IpCidr};
-
-pub const PORT_DISCOVERY: u16 = 50000;
-pub const PORT_BEAT: u16 = 50001;
-pub const PORT_STATUS: u16 = 50002;
-pub const MAGIC: [u8; 10] = [0x51, 0x73, 0x70, 0x74, 0x31, 0x57, 0x6d, 0x4a, 0x4f, 0x4c];
-pub const PKT_KEEPALIVE: u8 = 0x06;
-pub const PKT_ANNOUNCE: u8 = 0x0a;
+use xdj_core_prolink::{
+    pitch_to_percent, BPM_NONE, MAGIC, PKT_ABS_POSITION, PKT_ANNOUNCE, PKT_BEAT, PKT_CDJ_STATUS,
+    PKT_KEEPALIVE, PKT_MIXER_STATUS, PORT_DISCOVERY,
+};
 
 pub struct ProLinkStack {
     iface: Interface,
@@ -38,10 +35,11 @@ impl ProLinkStack {
         }
         let pkt_type = packet[10];
         match pkt_type {
-            0x28 => self.parse_beat_packet(packet),
-            0x0b => self.parse_abs_position(packet),
-            0x0a => self.parse_cdj_status(packet),
-            0x29 => self.parse_mixer_status(packet),
+            PKT_BEAT => self.parse_beat_packet(packet),
+            PKT_ABS_POSITION => self.parse_abs_position(packet),
+            PKT_CDJ_STATUS => self.parse_cdj_status(packet),
+            PKT_MIXER_STATUS => self.parse_mixer_status(packet),
+            PKT_KEEPALIVE => Some(ProLinkPacket::KeepAlive),
             _ => None,
         }
     }
@@ -51,14 +49,14 @@ impl ProLinkStack {
             return None;
         }
         let bpm_raw = u16::from_be_bytes([packet[0x5a], packet[0x5b]]);
-        let track_bpm = if bpm_raw == 0xFFFF {
+        let track_bpm = if bpm_raw == BPM_NONE {
             0.0
         } else {
             bpm_raw as f64 / 100.0
         };
         let pitch_raw =
             u32::from_be_bytes([packet[0x54], packet[0x55], packet[0x56], packet[0x57]]);
-        let pitch_pct = (pitch_raw as f64 - 0x0010_0000_f64) / 0x0010_0000_f64 * 100.0;
+        let pitch_pct = pitch_to_percent(pitch_raw);
         let eff_bpm = if track_bpm > 0.0 {
             track_bpm * (1.0 + pitch_pct / 100.0)
         } else {
@@ -102,7 +100,7 @@ impl ProLinkStack {
         let is_master = (state & 0x0020) != 0;
 
         let bpm_raw = u16::from_be_bytes([packet[0x92], packet[0x93]]);
-        let track_bpm = if bpm_raw == 0xFFFF {
+        let track_bpm = if bpm_raw == BPM_NONE {
             0.0
         } else {
             bpm_raw as f64 / 100.0
@@ -110,7 +108,7 @@ impl ProLinkStack {
 
         let pitch_raw =
             u32::from_be_bytes([packet[0x98], packet[0x99], packet[0x9a], packet[0x9b]]);
-        let pitch_pct = (pitch_raw as f64 - 0x0010_0000_f64) / 0x0010_0000_f64 * 100.0;
+        let pitch_pct = pitch_to_percent(pitch_raw);
         let eff_bpm = if track_bpm > 0.0 {
             track_bpm * (1.0 + pitch_pct / 100.0)
         } else {
@@ -139,7 +137,7 @@ impl ProLinkStack {
         Some(ProLinkPacket::MixerStatus(MixerStatus {
             device_number: packet[0x21],
             is_master,
-            track_bpm: if bpm_raw == 0xFFFF {
+            track_bpm: if bpm_raw == BPM_NONE {
                 None
             } else {
                 Some(bpm_raw as f64 / 100.0)
