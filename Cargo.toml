@@ -4,10 +4,11 @@ members = [
   "host",
   "esp32",
   "esp32-emulator",
+  "crates/xdj-core-prolink",
 ]
 
 [workspace.package]
-version = "1.1.7"
+version = "1.2.0"
 edition = "2021"
 license = "Proprietary"
 authors = ["xdj-midi team"]
