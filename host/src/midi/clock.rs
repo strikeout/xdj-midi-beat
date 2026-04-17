@@ -12,9 +12,10 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use midir::MidiOutputConnection;
 use parking_lot::Mutex;
 use tokio::sync::broadcast;
+
+use crate::midi::MidiTransport;
 
 use crate::config::SharedConfig;
 use crate::prolink::beat_listener::BeatEvent;
@@ -157,7 +158,7 @@ fn drain_beat_events(
 // ── Main clock task ───────────────────────────────────────────────────────────
 
 pub async fn run(
-    conn: Arc<Mutex<Option<MidiOutputConnection>>>,
+    midi: Arc<dyn MidiTransport>,
     state: SharedState,
     mut beat_rx: broadcast::Receiver<BeatEvent>,
     cfg: SharedConfig,
@@ -179,10 +180,7 @@ pub async fn run(
                 if cs.running {
                     cs.running = false;
                     cs.has_started = false;
-                    let mut c = conn.lock();
-                    if let Some(ref mut c) = *c {
-                        let _ = c.send(&[MSG_STOP]);
-                    }
+                    let _ = midi.send_message(&[MSG_STOP]);
                     tracing::info!("MIDI clock disabled at runtime");
                 }
             } else {
@@ -192,14 +190,24 @@ pub async fn run(
         }
 
         // ── Compute next pulse deadline ──────────────────────────────────────
-        let latency_offset_ms = cfg.read().midi.latency_compensation_ms;
+        // Latency compensation is a ONE-TIME offset applied only on the first pulse
+        // after clock starts (to account for output interface delay).
+        // After first pulse, normal intervals continue without offset.
+        let now = Instant::now();
+        let needs_latency = cs.running
+            && now.duration_since(cs.last_pulse).as_millis() < 10
+            && cfg.read().midi.latency_compensation_ms != 0;
+
         let next_pulse_at = if clock_enabled && cs.running && cs.interval_ns > 0 {
             let base = cs.last_pulse + Duration::from_nanos(cs.interval_ns);
-            if latency_offset_ms > 0 {
-                base + Duration::from_millis(latency_offset_ms as u64)
-            } else if latency_offset_ms < 0 {
-                base.checked_sub(Duration::from_millis((-latency_offset_ms) as u64))
-                    .unwrap_or(base)
+            if needs_latency {
+                let latency_offset_ms = cfg.read().midi.latency_compensation_ms;
+                if latency_offset_ms > 0 {
+                    base + Duration::from_millis(latency_offset_ms as u64)
+                } else {
+                    base.checked_sub(Duration::from_millis((-latency_offset_ms) as u64))
+                        .unwrap_or(base)
+                }
             } else {
                 base
             }
@@ -241,23 +249,15 @@ pub async fn run(
             }
             let msg = if cs.has_started { MSG_CONTINUE } else { MSG_START };
             cs.has_started = true;
-            {
-                let mut c = conn.lock();
-                if let Some(ref mut c) = *c {
-                    // Send Start/Continue followed by the first clock pulse
-                    // immediately (MIDI spec: clock should follow Start without delay).
-                    let _ = c.send(&[msg]);
-                    let _ = c.send(&[MSG_CLOCK]);
-                }
-            }
+            // Send Start/Continue followed by the first clock pulse
+            // immediately (MIDI spec: clock should follow Start without delay).
+            let _ = midi.send_message(&[msg]);
+            let _ = midi.send_message(&[MSG_CLOCK]);
             activity.lock().clock_pulses += 1;
             tracing::debug!(msg = if msg == MSG_START { "Start" } else { "Continue" }, "MIDI transport sent");
         } else if (!clock_enabled || !is_playing) && cs.running {
             cs.running = false;
-            let mut c = conn.lock();
-            if let Some(ref mut c) = *c {
-                let _ = c.send(&[MSG_STOP]);
-            }
+            let _ = midi.send_message(&[MSG_STOP]);
             tracing::debug!("MIDI Stop sent");
         }
 
@@ -270,10 +270,7 @@ pub async fn run(
                 let overshoot = elapsed - cs.interval_ns;
                 cs.last_pulse = now - Duration::from_nanos(overshoot.min(cs.interval_ns / 2));
                 cs.pulse_index = (cs.pulse_index + 1) % PPQ;
-                let mut c = conn.lock();
-                if let Some(ref mut c) = *c {
-                    let _ = c.send(&[MSG_CLOCK]);
-                }
+                let _ = midi.send_message(&[MSG_CLOCK]);
                 activity.lock().clock_pulses += 1;
             }
         }
@@ -283,6 +280,10 @@ pub async fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{new_shared, Config};
+    use crate::midi::test_utils::MockMidiTransport;
+    use crate::state::{BeatSource, MasterState};
+    use std::time::Duration;
 
     fn make_beat(device_number: u8, effective_bpm: f64) -> BeatEvent {
         BeatEvent::Beat(crate::prolink::packets::BeatPacket {
@@ -322,6 +323,25 @@ mod tests {
     fn bpm_to_interval_ns_at_140() {
         let ns = bpm_to_interval_ns(140.0);
         let expected: u64 = (60.0e9_f64 / (140.0 * 24.0)).round() as u64;
+        assert_eq!(ns, expected);
+    }
+
+    #[test]
+    fn bpm_to_interval_ns_edge_cases() {
+        // Very fast BPM
+        let ns = bpm_to_interval_ns(300.0);
+        let expected: u64 = (60.0e9_f64 / (300.0 * 24.0)).round() as u64;
+        assert_eq!(ns, expected);
+        assert!(ns > 0); // Should not underflow
+        
+        // Very slow BPM  
+        let ns = bpm_to_interval_ns(20.0);
+        let expected: u64 = (60.0e9_f64 / (20.0 * 24.0)).round() as u64;
+        assert_eq!(ns, expected);
+        
+        // Standard DJ range
+        let ns = bpm_to_interval_ns(128.0);
+        let expected: u64 = (60.0e9_f64 / (128.0 * 24.0)).round() as u64;
         assert_eq!(ns, expected);
     }
 
@@ -419,5 +439,70 @@ mod tests {
             },
         );
         assert!((cs.last_bpm - 122.0).abs() < 0.01);
+    }
+
+    #[tokio::test]
+    async fn clock_enabled_toggle_takes_effect_at_runtime() {
+        let midi = Arc::new(MockMidiTransport::new());
+        let midi_transport: Arc<dyn MidiTransport> = midi.clone();
+        let cfg = new_shared(Config::default());
+        cfg.write().midi.clock_enabled = false;
+        let state = crate::state::new_shared(30);
+        state.write().master = MasterState {
+            source: Some(BeatSource::AbletonLink),
+            bpm: 120.0,
+            is_playing: true,
+            ..Default::default()
+        };
+        let (_beat_tx, beat_rx) = broadcast::channel(8);
+        let activity = Arc::new(Mutex::new(MidiActivity::default()));
+
+        let handle = tokio::spawn(run(midi_transport, state, beat_rx, cfg.clone(), activity));
+
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        assert!(midi.get_messages().is_empty());
+
+        cfg.write().midi.clock_enabled = true;
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        let messages = midi.get_messages();
+        assert!(messages.contains(&vec![MSG_START]));
+        assert!(messages.contains(&vec![MSG_CLOCK]));
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn latency_compensation_changes_take_effect_at_runtime() {
+        let midi = Arc::new(MockMidiTransport::new());
+        let midi_transport: Arc<dyn MidiTransport> = midi.clone();
+        let cfg = new_shared(Config::default());
+        cfg.write().midi.clock_enabled = true;
+        let state = crate::state::new_shared(30);
+        state.write().master = MasterState {
+            source: Some(BeatSource::AbletonLink),
+            bpm: 120.0,
+            is_playing: true,
+            ..Default::default()
+        };
+        let (_beat_tx, beat_rx) = broadcast::channel(8);
+        let activity = Arc::new(Mutex::new(MidiActivity::default()));
+
+        let handle = tokio::spawn(run(midi_transport, state, beat_rx, cfg.clone(), activity));
+
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        let baseline = midi.get_messages().len();
+
+        cfg.write().midi.latency_compensation_ms = 200;
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        let delayed_count = midi.get_messages().len() - baseline;
+        assert!(delayed_count <= 1);
+
+        let after_delay_total = midi.get_messages().len();
+        cfg.write().midi.latency_compensation_ms = 0;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let resumed_delta = midi.get_messages().len() - after_delay_total;
+        assert!(resumed_delta >= 3);
+
+        handle.abort();
     }
 }
