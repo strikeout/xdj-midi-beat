@@ -203,10 +203,12 @@ pub async fn run(
             if needs_latency {
                 let latency_offset_ms = cfg.read().midi.latency_compensation_ms;
                 if latency_offset_ms > 0 {
-                    base + Duration::from_millis(latency_offset_ms as u64)
-                } else {
-                    base.checked_sub(Duration::from_millis((-latency_offset_ms) as u64))
+                    // Positive latency = send EARLIER to compensate for output delay
+                    base.checked_sub(Duration::from_millis(latency_offset_ms as u64))
                         .unwrap_or(base)
+                } else {
+                    // Negative latency = send LATER (for testing/offset scenarios)
+                    base + Duration::from_millis((-latency_offset_ms) as u64)
                 }
             } else {
                 base
@@ -494,8 +496,9 @@ mod tests {
 
         cfg.write().midi.latency_compensation_ms = 200;
         tokio::time::sleep(Duration::from_millis(80)).await;
-        let delayed_count = midi.get_messages().len() - baseline;
-        assert!(delayed_count <= 1);
+        let earlier_count = midi.get_messages().len() - baseline;
+        // Positive latency = send EARLIER → should get MORE messages during window
+        assert!(earlier_count >= 3);
 
         let after_delay_total = midi.get_messages().len();
         cfg.write().midi.latency_compensation_ms = 0;
