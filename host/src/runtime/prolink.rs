@@ -18,8 +18,6 @@ pub fn spawn(
         midi_conn: _,
         midi_activity: _,
         track_change_tx: _,
-        use_prolink: _,
-        use_link: _,
     } = ctx;
 
     let bind_ip = startup_cfg.bind_ip;

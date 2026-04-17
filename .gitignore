@@ -2,3 +2,7 @@
 /vendor
 .DS_Store
 *.log
+*opencode*
+.sisyphus
+/graphify-out
+

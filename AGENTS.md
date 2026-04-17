@@ -126,3 +126,12 @@ ESP32 CI uses the `espressif/idf:latest` Docker container and builds on the `esp
 - Adding a new architecture target should mirror the `esp32`/`esp32-emulator` split:
   - firmware crate + native emulator crate
   - both share protocol via a new shared crate (planned as `xdj-core-prolink`)
+
+## graphify
+
+This project has a graphify knowledge graph at graphify-out/.
+
+Rules:
+- Before answering architecture or codebase questions, read graphify-out/GRAPH_REPORT.md for god nodes and community structure
+- If graphify-out/wiki/index.md exists, navigate it instead of reading raw files
+- After modifying code files in this session, run `graphify update .` to keep the graph current (AST-only, no API cost)

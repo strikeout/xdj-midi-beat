@@ -41,7 +41,10 @@ async fn beat_applier(
                 state.set_smoothing_ms(smoothing_ms);
                 state.apply_abs_position(&ap);
             }
-            Ok(BeatEvent::LinkBeat { .. }) => {}
+            Ok(BeatEvent::LinkBeat { bpm, beat_in_bar, bar_phase, beat_phase }) => {
+                let mut state = state.write();
+                state.apply_link_state(bpm, beat_in_bar, bar_phase, beat_phase, true, true);
+            }
             Err(broadcast::error::RecvError::Closed) => break,
             Err(broadcast::error::RecvError::Lagged(n)) => {
                 tracing::warn!("Beat applier lagged, dropped {n} events");
@@ -83,5 +86,52 @@ async fn status_applier(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{new_shared, Config};
+    use std::time::Duration;
+
+    fn beat(device_number: u8, bpm: f64) -> BeatEvent {
+        BeatEvent::Beat(crate::prolink::packets::BeatPacket {
+            device_number,
+            next_beat_ms: 500,
+            second_beat_ms: 1000,
+            next_bar_ms: 2000,
+            pitch_raw: crate::prolink::PITCH_NORMAL,
+            bpm_raw: (bpm * 100.0) as u16,
+            beat_in_bar: 1,
+            track_bpm: Some(bpm),
+            effective_bpm: bpm,
+            pitch_pct: 0.0,
+        })
+    }
+
+    #[tokio::test]
+    async fn smoothing_setting_changes_take_effect_at_runtime() {
+        let cfg = new_shared(Config::default());
+        cfg.write().midi.smoothing_ms = 1000;
+        let state = crate::state::new_shared(1000);
+        let (tx, rx) = broadcast::channel(8);
+
+        let handle = tokio::spawn(beat_applier(Arc::clone(&state), Arc::clone(&cfg), rx));
+
+        let _ = tx.send(beat(1, 100.0));
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let _ = tx.send(beat(1, 200.0));
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let smoothed = state.read().devices.get(&1).unwrap().effective_bpm;
+        assert!((smoothed - 150.0).abs() < 0.1);
+
+        cfg.write().midi.smoothing_ms = 0;
+        let _ = tx.send(beat(1, 200.0));
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let unsmoothed = state.read().devices.get(&1).unwrap().effective_bpm;
+        assert!((unsmoothed - 200.0).abs() < 0.1);
+
+        handle.abort();
     }
 }

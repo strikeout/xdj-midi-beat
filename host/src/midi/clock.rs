@@ -45,6 +45,8 @@ struct ClockState {
     running: bool,
     /// Whether the clock has been started at least once (for Continue vs Start).
     has_started: bool,
+    /// Whether we're waiting for a beat to align before starting.
+    pending_start: bool,
     /// BPM at last update (used to detect changes).
     last_bpm: f64,
 }
@@ -57,6 +59,7 @@ impl ClockState {
             pulse_index: 0,
             running: false,
             has_started: false,
+            pending_start: false,
             last_bpm: 0.0,
         }
     }
@@ -120,6 +123,14 @@ fn apply_phase_correction(cs: &mut ClockState, beat_at: Instant) {
 
 /// Process a single beat event, updating clock BPM and phase correction.
 fn handle_beat_event(cs: &mut ClockState, state: &SharedState, evt: BeatEvent) {
+    if cs.pending_start {
+        cs.pending_start = false;
+        cs.running = true;
+        cs.pulse_index = 0;
+        cs.last_pulse = Instant::now();
+        cs.has_started = true;
+    }
+
     match evt {
         BeatEvent::Beat(bp) => {
             let master_num = state.read().master.device_number;
@@ -184,8 +195,8 @@ pub async fn run(
                     tracing::info!("MIDI clock disabled at runtime");
                 }
             } else {
-                tracing::info!("MIDI clock enabled at runtime");
-                cs.last_pulse = Instant::now();
+                tracing::info!("MIDI clock enabled at runtime, waiting for beat alignment");
+                cs.pending_start = true;
             }
         }
 

@@ -49,6 +49,195 @@ fn pitch_cc(pct: f64) -> u8 {
     scale01(normalised)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{new_shared, Config};
+    use crate::midi::test_utils::MockMidiTransport;
+    use crate::state::{new_shared as new_shared_state, BeatSource, MasterState};
+    use std::time::Duration;
+
+    #[test]
+    fn test_scale01() {
+        assert_eq!(scale01(0.0), 0);
+        assert_eq!(scale01(0.5), 64);
+        assert_eq!(scale01(1.0), 127);
+        assert_eq!(scale01(-0.1), 0); // clamped
+        assert_eq!(scale01(1.1), 127); // clamped
+    }
+
+    #[test]
+    fn test_bpm_coarse() {
+        assert_eq!(bpm_coarse(60.0), 0);
+        assert_eq!(bpm_coarse(120.0), 60);
+        assert_eq!(bpm_coarse(187.0), 127);
+        assert_eq!(bpm_coarse(59.0), 0); // clamped
+        assert_eq!(bpm_coarse(200.0), 127); // clamped
+    }
+
+    #[test]
+    fn test_bpm_fine() {
+        assert_eq!(bpm_fine(120.0), 0); // 120.00
+        assert_eq!(bpm_fine(120.5), 64); // 120.50
+        assert_eq!(bpm_fine(120.99), 126); // 120.99
+        assert_eq!(bpm_fine(120.999), 127); // rounds to 127
+    }
+
+    #[test]
+    fn test_pitch_cc() {
+        assert_eq!(pitch_cc(-10.0), 0);
+        assert_eq!(pitch_cc(0.0), 64);
+        assert_eq!(pitch_cc(10.0), 127);
+        assert_eq!(pitch_cc(-15.0), 0); // clamped
+        assert_eq!(pitch_cc(15.0), 127); // clamped
+        assert_eq!(pitch_cc(5.0), 95); // 0.75 * 127 = 95.25 rounded to 95
+    }
+
+    #[test]
+    fn test_midi_message_helpers() {
+        assert_eq!(note_on(0, 60, 127), [0x90, 60, 127]);
+        assert_eq!(note_off(0, 60), [0x80, 60, 0]);
+        assert_eq!(cc(2, 10, 99), [0xB2, 10, 99]);
+        assert_eq!(note_on(17, 200, 200), [0x91, 72, 72]);
+        assert_eq!(cc(31, 255, 255), [0xBF, 127, 127]);
+    }
+
+    #[test]
+    fn test_beat_velocity() {
+        assert_eq!(beat_velocity(1), 127);
+        assert_eq!(beat_velocity(2), 80);
+        assert_eq!(beat_velocity(3), 64);
+        assert_eq!(beat_velocity(4), 80);
+    }
+
+    #[test]
+    fn test_fire_beat_notes_regular_and_downbeat() {
+        let midi = MockMidiTransport::new();
+        let note_cfg = NoteConfig::default();
+        let activity = Arc::new(Mutex::new(MidiActivity::default()));
+
+        fire_beat_notes(&midi, &note_cfg, 2, &activity);
+        let msgs = midi.get_messages();
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0], note_on(note_cfg.channel, note_cfg.beat, 80).to_vec());
+        assert_eq!(msgs[1], note_off(note_cfg.channel, note_cfg.beat).to_vec());
+
+        midi.clear_messages();
+        fire_beat_notes(&midi, &note_cfg, 1, &activity);
+        let msgs = midi.get_messages();
+        assert_eq!(msgs.len(), 4);
+        assert_eq!(msgs[0], note_on(note_cfg.channel, note_cfg.beat, 127).to_vec());
+        assert_eq!(msgs[1], note_off(note_cfg.channel, note_cfg.beat).to_vec());
+        assert_eq!(msgs[2], note_on(note_cfg.channel, note_cfg.downbeat, 127).to_vec());
+        assert_eq!(msgs[3], note_off(note_cfg.channel, note_cfg.downbeat).to_vec());
+    }
+
+    #[tokio::test]
+    async fn runtime_note_config_changes_take_effect() {
+        let midi = Arc::new(MockMidiTransport::new());
+        let midi_transport: Arc<dyn MidiTransport> = midi.clone();
+        let cfg = new_shared(Config::default());
+        let state = new_shared_state(30);
+        let (_status_tx, status_rx) = broadcast::channel(8);
+        let (beat_tx, beat_rx) = broadcast::channel(8);
+        let activity = Arc::new(Mutex::new(MidiActivity::default()));
+
+        let handle = tokio::spawn(run_with_midi(
+            midi_transport,
+            state,
+            beat_rx,
+            status_rx,
+            cfg.clone(),
+            activity,
+        ));
+
+        let _ = beat_tx.send(BeatEvent::LinkBeat {
+            bpm: 120.0,
+            beat_in_bar: 2,
+            bar_phase: 0.25,
+            beat_phase: 0.5,
+        });
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert!(midi.get_messages().contains(&note_on(9, 36, 80).to_vec()));
+
+        midi.clear_messages();
+        {
+            let mut guard = cfg.write();
+            guard.midi.notes.channel = 1;
+            guard.midi.notes.beat = 40;
+        }
+        let _ = beat_tx.send(BeatEvent::LinkBeat {
+            bpm: 120.0,
+            beat_in_bar: 2,
+            bar_phase: 0.25,
+            beat_phase: 0.5,
+        });
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert!(midi.get_messages().contains(&note_on(1, 40, 80).to_vec()));
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn runtime_cc_config_changes_take_effect() {
+        let midi = Arc::new(MockMidiTransport::new());
+        let midi_transport: Arc<dyn MidiTransport> = midi.clone();
+        let cfg = new_shared(Config::default());
+        let state = new_shared_state(30);
+        state.write().master = MasterState {
+            source: Some(BeatSource::ProLink),
+            bpm: 128.0,
+            pitch_pct: 0.0,
+            bar_phase: 0.5,
+            beat_phase: 0.25,
+            is_playing: true,
+            device_number: 1,
+            ..Default::default()
+        };
+        let (status_tx, status_rx) = broadcast::channel(8);
+        let (_beat_tx, beat_rx) = broadcast::channel(8);
+        let activity = Arc::new(Mutex::new(MidiActivity::default()));
+
+        let handle = tokio::spawn(run_with_midi(
+            midi_transport,
+            state.clone(),
+            beat_rx,
+            status_rx,
+            cfg.clone(),
+            activity,
+        ));
+
+        let _ = status_tx.send(StatusEvent::Mixer(crate::prolink::packets::MixerStatus {
+            device_number: 16,
+            is_master: true,
+            bpm_raw: 12800,
+            track_bpm: Some(128.0),
+            beat_in_bar: 1,
+        }));
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert!(midi.get_messages().contains(&cc(0, 2, pitch_cc(0.0)).to_vec()));
+
+        midi.clear_messages();
+        {
+            let mut guard = cfg.write();
+            guard.midi.cc.channel = 2;
+            guard.midi.cc.pitch = 12;
+        }
+        state.write().master.pitch_pct = 5.0;
+        let _ = status_tx.send(StatusEvent::Mixer(crate::prolink::packets::MixerStatus {
+            device_number: 16,
+            is_master: true,
+            bpm_raw: 12800,
+            track_bpm: Some(128.0),
+            beat_in_bar: 1,
+        }));
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert!(midi.get_messages().contains(&cc(2, 12, pitch_cc(5.0)).to_vec()));
+
+        handle.abort();
+    }
+}
+
 // ── Beat note helper ──────────────────────────────────────────────────────────
 
 /// Beat velocity by position: 127 on beat 1, 64 on beat 3, 80 on beats 2/4.
@@ -95,16 +284,14 @@ struct PrevCc {
 
 // ── Main mapper task ──────────────────────────────────────────────────────────
 
-pub async fn run(
-    conn: Arc<Mutex<Option<MidiOutputConnection>>>,
+async fn run_with_midi(
+    midi: Arc<dyn MidiTransport>,
     state: SharedState,
     mut beat_rx: broadcast::Receiver<BeatEvent>,
     mut status_rx: broadcast::Receiver<StatusEvent>,
     cfg: SharedConfig,
     activity: Arc<Mutex<MidiActivity>>,
 ) {
-    let midi = MidirTransport::new(Arc::clone(&conn));
-    let midi: &'static dyn MidiTransport = Box::leak(Box::new(midi));
     let mut prev = PrevCc::default();
     let mut prev_phrase_idx: Option<usize> = None;
     let mut prev_phrase_16_beat: u8 = 0;
@@ -122,7 +309,7 @@ pub async fn run(
                         }
 
                         let note_cfg = cfg.read().midi.notes.clone();
-                        fire_beat_notes(midi, &note_cfg, bp.beat_in_bar, &activity);
+                        fire_beat_notes(midi.as_ref(), &note_cfg, bp.beat_in_bar, &activity);
                         tracing::debug!(
                             device = bp.device_number,
                             beat = bp.beat_in_bar,
@@ -135,7 +322,7 @@ pub async fn run(
                     }
                     Ok(BeatEvent::LinkBeat { bpm, beat_in_bar, .. }) => {
                         let note_cfg = cfg.read().midi.notes.clone();
-                        fire_beat_notes(midi, &note_cfg, beat_in_bar, &activity);
+                        fire_beat_notes(midi.as_ref(), &note_cfg, beat_in_bar, &activity);
                         tracing::debug!(
                             beat = beat_in_bar,
                             bpm = %format!("{:.2}", bpm),
@@ -221,4 +408,16 @@ pub async fn run(
             prev_phrase_idx = cur_phrase;
         }
     }
+}
+
+pub async fn run(
+    conn: Arc<Mutex<Option<MidiOutputConnection>>>,
+    state: SharedState,
+    beat_rx: broadcast::Receiver<BeatEvent>,
+    status_rx: broadcast::Receiver<StatusEvent>,
+    cfg: SharedConfig,
+    activity: Arc<Mutex<MidiActivity>>,
+) {
+    let midi: Arc<dyn MidiTransport> = Arc::new(MidirTransport::new(Arc::clone(&conn)));
+    run_with_midi(midi, state, beat_rx, status_rx, cfg, activity).await;
 }

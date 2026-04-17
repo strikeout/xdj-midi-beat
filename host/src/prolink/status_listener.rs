@@ -11,7 +11,7 @@ use tokio::net::UdpSocket;
 use tokio::sync::broadcast;
 
 use super::{
-    packets::{parse_cdj_status, parse_mixer_status, CdjStatus, MixerStatus},
+    packets::{cdj_state_word, parse_cdj_status, parse_mixer_status, CdjStatus, MixerStatus},
     PORT_STATUS,
 };
 
@@ -57,13 +57,14 @@ pub async fn run(
                     }
                     let cnt = diag_counts.entry(s.device_number).or_insert(0);
                     if *cnt < 3 || s.is_master {
-                        *cnt += 1;
-                        let state16 = u16::from_be_bytes([data[0x88], data[0x89]]);
+                        *cnt = cnt.saturating_add(1);
                         tracing::debug!(
                             device = s.device_number,
                             src = %src,
                             pkt_len = len,
-                            state_raw = format!("0x{:04x}", state16),
+                            state_raw = cdj_state_word(data)
+                                .map(|state| format!("0x{state:04x}"))
+                                .unwrap_or_else(|| format!("unavailable(len={len})")),
                             is_master = s.is_master,
                             is_playing = s.is_playing_flag,
                             play_state = ?s.play_state,
@@ -79,7 +80,7 @@ pub async fn run(
                 } else if let Some(s) = parse_mixer_status(data) {
                     let cnt = diag_counts.entry(s.device_number).or_insert(0);
                     if *cnt < 3 {
-                        *cnt += 1;
+                        *cnt = cnt.saturating_add(1);
                         tracing::debug!(
                             device = s.device_number,
                             src = %src,

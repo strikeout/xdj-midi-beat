@@ -5,6 +5,7 @@ pub mod song_structure;
 pub mod track_change;
 
 pub use beat_source::BeatSource;
+#[allow(unused_imports)]
 pub use device::{DeviceState, MasterState};
 pub use dj_state::{new_shared, DjState, SharedState};
 pub use song_structure::{PhraseEntry, PhraseKind, SongStructure, TrackMood};

@@ -7,6 +7,9 @@ use super::{
     PKT_CDJ_STATUS, PKT_KEEPALIVE, PKT_MIXER_STATUS,
 };
 
+pub(crate) const CDJ_STATUS_PACKET_LEN: usize = 0xd4;
+const CDJ_STATUS_STATE_OFFSET: usize = 0x88;
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 #[inline]
@@ -282,7 +285,7 @@ pub struct CdjStatus {
 
 pub fn parse_cdj_status(data: &[u8]) -> Option<CdjStatus> {
     // Minimum size for nexus-era packet (0xD4 bytes)
-    if data.len() < 0xd4 {
+    if data.len() < CDJ_STATUS_PACKET_LEN {
         return None;
     }
     if !has_magic(data) || data[0x0a] != PKT_CDJ_STATUS {
@@ -290,7 +293,7 @@ pub fn parse_cdj_status(data: &[u8]) -> Option<CdjStatus> {
     }
     // State flags at 0x88-0x89 (Int16ub / StateMask):
     //   bit 6 = play, bit 5 = master, bit 4 = sync, bit 3 = on-air
-    let state = u16be(data, 0x88);
+    let state = cdj_state_word(data)?;
     let is_master = state & 0x0020 != 0;
     let is_sync = state & 0x0010 != 0;
     let is_on_air = state & 0x0008 != 0;
@@ -324,6 +327,11 @@ pub fn parse_cdj_status(data: &[u8]) -> Option<CdjStatus> {
         track_type: data[0x2a],
         rekordbox_id: u32be(data, 0x2c),
     })
+}
+
+pub(crate) fn cdj_state_word(data: &[u8]) -> Option<u16> {
+    let bytes = data.get(CDJ_STATUS_STATE_OFFSET..CDJ_STATUS_STATE_OFFSET + 2)?;
+    Some(u16::from_be_bytes([bytes[0], bytes[1]]))
 }
 
 // ── Mixer status packet (port 50002, type 0x29) ───────────────────────────────
@@ -413,5 +421,19 @@ mod tests {
         assert!((pitch_to_percent(PITCH_NORMAL)).abs() < 0.001);
         assert!((pitch_to_percent(PITCH_NORMAL * 2) - 100.0).abs() < 0.001);
         assert!((pitch_to_percent(0) - (-100.0)).abs() < 0.001);
+    }
+
+    #[test]
+    fn cdj_state_word_short_packet_does_not_panic() {
+        let packet = magic_pkt(PKT_CDJ_STATUS, 0x89);
+
+        assert_eq!(cdj_state_word(&packet), None);
+    }
+
+    #[test]
+    fn parse_cdj_status_rejects_truncated_packet() {
+        let packet = magic_pkt(PKT_CDJ_STATUS, CDJ_STATUS_PACKET_LEN - 1);
+
+        assert!(parse_cdj_status(&packet).is_none());
     }
 }

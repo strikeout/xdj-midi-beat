@@ -4,6 +4,7 @@ use std::time::Instant;
 
 use parking_lot::RwLock;
 
+use crate::config::Source;
 use crate::prolink::packets::{AbsPositionPacket, BeatPacket, CdjStatus, MixerStatus};
 
 use super::beat_source::BeatSource;
@@ -19,6 +20,8 @@ pub struct DjState {
     master_device_num: u8,
     pub prolink_seen: bool,
     pub link_peer_count: usize,
+    source_mode: Source,
+    last_link_master: Option<MasterState>,
 }
 
 impl DjState {
@@ -31,6 +34,44 @@ impl DjState {
             master_device_num: 0,
             prolink_seen: false,
             link_peer_count: 0,
+            source_mode: Source::Auto,
+            last_link_master: None,
+        }
+    }
+
+    pub fn set_source_mode(&mut self, source_mode: Source) {
+        if self.source_mode != source_mode {
+            self.source_mode = source_mode;
+            self.reconcile_source_mode();
+        }
+    }
+
+    fn reconcile_source_mode(&mut self) {
+        match self.source_mode {
+            Source::Auto => {
+                if self.link_peer_count > 0 {
+                    if !self.apply_cached_link_master() {
+                        self.refresh_master();
+                    }
+                } else {
+                    self.refresh_master();
+                }
+            }
+            Source::Link => {
+                if !self.apply_cached_link_master() {
+                    self.master = MasterState::default();
+                }
+            }
+            Source::ProLink => self.refresh_master(),
+        }
+    }
+
+    fn apply_cached_link_master(&mut self) -> bool {
+        if let Some(link_master) = self.last_link_master.clone() {
+            self.master = link_master;
+            true
+        } else {
+            false
         }
     }
 
@@ -246,6 +287,18 @@ impl DjState {
     }
 
     fn refresh_master(&mut self) {
+        if self.source_mode == Source::Link {
+            return;
+        }
+
+        let link_active_with_peers = self.link_peer_count > 0
+            && self.master.source == Some(BeatSource::AbletonLink)
+            && self.master.bpm > 0.0;
+
+        if self.source_mode == Source::Auto && link_active_with_peers {
+            return;
+        }
+
         let prev_master = self.master.device_number;
 
         let (dev, is_virtual, selection_reason) = if self.master_device_num != 0 {
@@ -309,7 +362,6 @@ impl DjState {
                 bar_phase: dev.bar_phase,
                 beat_phase: dev.beat_phase,
                 is_playing: dev.is_playing,
-                is_on_air: dev.is_on_air,
                 last_beat_at: dev.last_beat_at,
                 is_virtual_master: is_virtual,
                 phrase_16_beat: dev.phrase_16_beat,
@@ -331,15 +383,7 @@ impl DjState {
         is_playing: bool,
         beat_crossed: bool,
     ) {
-        let has_link_peers = self.link_peer_count > 0;
-        let prolink_active =
-            self.master.source == Some(BeatSource::ProLink) && self.master.bpm > 0.0;
-
-        if prolink_active && !has_link_peers {
-            return;
-        }
-
-        self.master = MasterState {
+        let link_master = MasterState {
             device_number: 0,
             source: Some(BeatSource::AbletonLink),
             bpm,
@@ -348,7 +392,6 @@ impl DjState {
             bar_phase,
             beat_phase,
             is_playing,
-            is_on_air: is_playing,
             last_beat_at: if beat_crossed {
                 Some(Instant::now())
             } else {
@@ -357,6 +400,21 @@ impl DjState {
             is_virtual_master: false,
             phrase_16_beat: 0,
         };
+        self.last_link_master = Some(link_master.clone());
+
+        if self.source_mode == Source::ProLink {
+            return;
+        }
+
+        let has_link_peers = self.link_peer_count > 0;
+        let prolink_active =
+            self.master.source == Some(BeatSource::ProLink) && self.master.bpm > 0.0;
+
+        if self.source_mode == Source::Auto && prolink_active && !has_link_peers {
+            return;
+        }
+
+        self.master = link_master;
     }
 
     pub fn remove_device(&mut self, num: u8) {
@@ -380,7 +438,7 @@ impl DjState {
             );
         }
         self.link_peer_count = count;
-        self.refresh_master();
+        self.reconcile_source_mode();
     }
 
     pub fn set_track_metadata(
@@ -451,4 +509,138 @@ pub type SharedState = Arc<RwLock<DjState>>;
 
 pub fn new_shared(smoothing_ms: u64) -> SharedState {
     Arc::new(RwLock::new(DjState::new(smoothing_ms)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::beat_source::BeatSource;
+
+    #[test]
+    fn test_auto_mode_link_priority_with_peers() {
+        let mut state = DjState::new(30);
+
+        state.set_link_peer_count(2);
+        state.apply_link_state(120.0, 1, 0.0, 0.5, true, true);
+
+        assert_eq!(state.master.source, Some(BeatSource::AbletonLink));
+        assert_eq!(state.master.bpm, 120.0);
+        assert!(state.master.is_playing);
+
+        let beat = crate::prolink::packets::BeatPacket {
+            device_number: 1,
+            next_beat_ms: 500,
+            second_beat_ms: 1000,
+            next_bar_ms: 2000,
+            pitch_raw: crate::prolink::PITCH_NORMAL,
+            bpm_raw: 13000,
+            beat_in_bar: 1,
+            track_bpm: Some(130.0),
+            effective_bpm: 130.0,
+            pitch_pct: 0.0,
+        };
+
+        state.apply_beat(&beat);
+
+        assert_eq!(state.master.source, Some(BeatSource::AbletonLink));
+        assert_eq!(state.master.bpm, 120.0);
+
+        state.set_link_peer_count(0);
+        state.apply_beat(&beat);
+
+        assert_eq!(state.master.source, Some(BeatSource::ProLink));
+        assert_eq!(state.master.bpm, 130.0);
+    }
+
+    #[test]
+    fn test_link_without_peers_does_not_override_prolink() {
+        let mut state = DjState::new(30);
+
+        let beat = crate::prolink::packets::BeatPacket {
+            device_number: 1,
+            next_beat_ms: 500,
+            second_beat_ms: 1000,
+            next_bar_ms: 2000,
+            pitch_raw: crate::prolink::PITCH_NORMAL,
+            bpm_raw: 12500,
+            beat_in_bar: 1,
+            track_bpm: Some(125.0),
+            effective_bpm: 125.0,
+            pitch_pct: 0.0,
+        };
+
+        state.apply_beat(&beat);
+        assert_eq!(state.master.source, Some(BeatSource::ProLink));
+        assert_eq!(state.master.bpm, 125.0);
+
+        state.apply_link_state(120.0, 1, 0.0, 0.5, true, true);
+
+        assert_eq!(state.master.source, Some(BeatSource::ProLink));
+        assert_eq!(state.master.bpm, 125.0);
+
+        state.set_link_peer_count(1);
+        state.apply_link_state(120.0, 1, 0.0, 0.5, true, true);
+
+        assert_eq!(state.master.source, Some(BeatSource::AbletonLink));
+        assert_eq!(state.master.bpm, 120.0);
+    }
+
+    #[test]
+    fn test_explicit_link_mode_suppresses_prolink() {
+        let mut state = DjState::new(30);
+        let beat = crate::prolink::packets::BeatPacket {
+            device_number: 1,
+            next_beat_ms: 500,
+            second_beat_ms: 1000,
+            next_bar_ms: 2000,
+            pitch_raw: crate::prolink::PITCH_NORMAL,
+            bpm_raw: 12800,
+            beat_in_bar: 1,
+            track_bpm: Some(128.0),
+            effective_bpm: 128.0,
+            pitch_pct: 0.0,
+        };
+
+        state.apply_beat(&beat);
+        assert_eq!(state.master.source, Some(BeatSource::ProLink));
+
+        state.set_source_mode(Source::Link);
+        assert_eq!(state.master.source, None);
+
+        state.apply_link_state(120.0, 1, 0.0, 0.5, true, true);
+        assert_eq!(state.master.source, Some(BeatSource::AbletonLink));
+
+        state.apply_beat(&beat);
+        assert_eq!(state.master.source, Some(BeatSource::AbletonLink));
+        assert_eq!(state.master.bpm, 120.0);
+    }
+
+    #[test]
+    fn test_explicit_prolink_mode_suppresses_link() {
+        let mut state = DjState::new(30);
+        let beat = crate::prolink::packets::BeatPacket {
+            device_number: 1,
+            next_beat_ms: 500,
+            second_beat_ms: 1000,
+            next_bar_ms: 2000,
+            pitch_raw: crate::prolink::PITCH_NORMAL,
+            bpm_raw: 12600,
+            beat_in_bar: 1,
+            track_bpm: Some(126.0),
+            effective_bpm: 126.0,
+            pitch_pct: 0.0,
+        };
+
+        state.set_link_peer_count(2);
+        state.apply_link_state(120.0, 1, 0.0, 0.5, true, true);
+        assert_eq!(state.master.source, Some(BeatSource::AbletonLink));
+
+        state.set_source_mode(Source::ProLink);
+        state.apply_beat(&beat);
+        assert_eq!(state.master.source, Some(BeatSource::ProLink));
+
+        state.apply_link_state(121.0, 2, 0.25, 0.5, true, true);
+        assert_eq!(state.master.source, Some(BeatSource::ProLink));
+        assert_eq!(state.master.bpm, 126.0);
+    }
 }

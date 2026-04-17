@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use parking_lot::Mutex;
 use tokio::sync::broadcast;
@@ -30,8 +31,15 @@ pub struct TaskContext {
     pub midi_conn: Arc<Mutex<Option<midir::MidiOutputConnection>>>,
     pub midi_activity: Arc<Mutex<MidiActivity>>,
     pub track_change_tx: mpsc::Sender<crate::state::TrackChange>,
-    pub use_prolink: bool,
-    pub use_link: bool,
+}
+
+#[cfg(test)]
+fn source_flags(source: crate::config::Source) -> (bool, bool) {
+    match source {
+        crate::config::Source::Auto => (true, true),
+        crate::config::Source::Link => (false, true),
+        crate::config::Source::ProLink => (true, false),
+    }
 }
 
 pub async fn run(ctx: AppContext, use_tui: bool) -> anyhow::Result<()> {
@@ -42,9 +50,6 @@ pub async fn run(ctx: AppContext, use_tui: bool) -> anyhow::Result<()> {
         dj_state,
         cfg,
         device_table,
-        bind_ip: _,
-        bcast_ip: _,
-        mac: _,
         device_tx,
         beat_tx,
         status_tx,
@@ -57,9 +62,6 @@ pub async fn run(ctx: AppContext, use_tui: bool) -> anyhow::Result<()> {
     let status_rx1 = status_tx.subscribe();
     let status_rx2 = status_tx.subscribe();
     let device_rx = device_tx.subscribe();
-
-    let use_prolink = startup_cfg.source != crate::config::Source::Link;
-    let use_link = startup_cfg.source != crate::config::Source::ProLink;
 
     let midi_activity: Arc<Mutex<MidiActivity>> =
         Arc::new(Mutex::new(MidiActivity::default()));
@@ -77,17 +79,30 @@ pub async fn run(ctx: AppContext, use_tui: bool) -> anyhow::Result<()> {
         midi_conn: Arc::clone(&midi_conn_owned),
         midi_activity: Arc::clone(&midi_activity),
         track_change_tx: track_change_tx.clone(),
-        use_prolink,
-        use_link,
     };
 
-    if use_prolink {
-        prolink::spawn(&task_ctx, startup_cfg.clone(), device_table.clone());
+    dj_state.write().set_source_mode(startup_cfg.source.clone());
+
+    {
+        let cfg = Arc::clone(&cfg);
+        let dj_state = Arc::clone(&dj_state);
+        let initial_source = startup_cfg.source.clone();
+        tokio::spawn(async move {
+            let mut last_source = initial_source;
+            loop {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                let current_source = cfg.read().source.clone();
+                if current_source != last_source {
+                    dj_state.write().set_source_mode(current_source.clone());
+                    last_source = current_source;
+                }
+            }
+        });
     }
 
-    if use_link {
-        link::spawn(task_ctx.clone(), startup_cfg.clone());
-    }
+    prolink::spawn(&task_ctx, startup_cfg.clone(), device_table.clone());
+
+    link::spawn(task_ctx.clone(), startup_cfg.clone());
 
     applier::spawn(task_ctx.clone(), beat_rx1, status_rx1, track_change_tx);
 
@@ -108,5 +123,26 @@ pub async fn run(ctx: AppContext, use_tui: bool) -> anyhow::Result<()> {
         .await
     } else {
         crate::app::headless_loop(dj_state, midi_conn_owned).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::source_flags;
+    use crate::config::Source;
+
+    #[test]
+    fn source_flags_auto_enables_both() {
+        assert_eq!(source_flags(Source::Auto), (true, true));
+    }
+
+    #[test]
+    fn source_flags_link_disables_prolink() {
+        assert_eq!(source_flags(Source::Link), (false, true));
+    }
+
+    #[test]
+    fn source_flags_prolink_disables_link() {
+        assert_eq!(source_flags(Source::ProLink), (true, false));
     }
 }

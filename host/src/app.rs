@@ -76,9 +76,6 @@ pub struct AppContext {
     pub dj_state: SharedState,
     pub cfg: config::SharedConfig,
     pub device_table: DeviceTable,
-    pub bind_ip: Ipv4Addr,
-    pub bcast_ip: Ipv4Addr,
-    pub mac: [u8; 6],
     // broadcast senders
     pub device_tx: broadcast::Sender<crate::prolink::discovery::DeviceEvent>,
     pub beat_tx: broadcast::Sender<crate::prolink::beat_listener::BeatEvent>,
@@ -188,7 +185,7 @@ pub fn init() -> anyhow::Result<AppContext> {
     let dj_state = crate::state::new_shared(startup_cfg.midi.smoothing_ms);
 
     // ── Broadcast channels ───────────────────────────────────────────────────
-    let (device_tx, device_rx) = broadcast::channel::<crate::prolink::discovery::DeviceEvent>(64);
+    let (device_tx, _device_rx) = broadcast::channel::<crate::prolink::discovery::DeviceEvent>(64);
     let (beat_tx, _beat_rx1) = broadcast::channel::<crate::prolink::beat_listener::BeatEvent>(256);
     let (status_tx, _status_rx1) =
         broadcast::channel::<crate::prolink::status_listener::StatusEvent>(256);
@@ -206,9 +203,6 @@ pub fn init() -> anyhow::Result<AppContext> {
         dj_state,
         cfg,
         device_table,
-        bind_ip,
-        bcast_ip,
-        mac,
         device_tx,
         beat_tx,
         status_tx,

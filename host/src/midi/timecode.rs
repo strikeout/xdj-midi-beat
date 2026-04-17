@@ -285,3 +285,66 @@ pub async fn run(
         ms.last_qf_time = Instant::now();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::MtcFrameRate;
+
+    #[test]
+    fn timecode_from_elapsed_and_total_frames_roundtrip() {
+        let tc = Timecode::from_elapsed(3661.5, 30);
+        assert_eq!(tc.hours, 1);
+        assert_eq!(tc.minutes, 1);
+        assert_eq!(tc.seconds, 1);
+        assert_eq!(tc.frames, 15);
+        assert_eq!(tc.total_frames(30), 109_845);
+    }
+
+    #[test]
+    fn timecode_increment_wraps_all_fields() {
+        let mut tc = Timecode {
+            hours: 23,
+            minutes: 59,
+            seconds: 59,
+            frames: 29,
+        };
+        tc.increment(30);
+        assert_eq!(tc.hours, 0);
+        assert_eq!(tc.minutes, 0);
+        assert_eq!(tc.seconds, 0);
+        assert_eq!(tc.frames, 0);
+    }
+
+    #[test]
+    fn quarter_frame_piece_encoding_is_correct() {
+        let tc = Timecode {
+            hours: 21,
+            minutes: 43,
+            seconds: 59,
+            frames: 27,
+        };
+        let r = MtcFrameRate::Fps25;
+
+        assert_eq!(quarter_frame_data(&tc, 0, &r), 0x0B);
+        assert_eq!(quarter_frame_data(&tc, 1, &r), 0x11);
+        assert_eq!(quarter_frame_data(&tc, 2, &r), 0x2B);
+        assert_eq!(quarter_frame_data(&tc, 3, &r), 0x33);
+        assert_eq!(quarter_frame_data(&tc, 4, &r), 0x4B);
+        assert_eq!(quarter_frame_data(&tc, 5, &r), 0x52);
+        assert_eq!(quarter_frame_data(&tc, 6, &r), 0x65);
+        assert_eq!(quarter_frame_data(&tc, 7, &r), 0x73);
+    }
+
+    #[test]
+    fn full_frame_sysex_contains_rate_and_time_fields() {
+        let tc = Timecode {
+            hours: 10,
+            minutes: 11,
+            seconds: 12,
+            frames: 13,
+        };
+        let msg = full_frame_sysex(&tc, &MtcFrameRate::Fps30);
+        assert_eq!(msg, [0xF0, 0x7F, 0x7F, 0x01, 0x01, 0x6A, 11, 12, 13, 0xF7]);
+    }
+}
