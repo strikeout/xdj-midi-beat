@@ -116,6 +116,7 @@ struct MtcState {
     play_start: Instant,
     /// Last known enabled state (for detecting runtime toggles).
     last_enabled: bool,
+    start_debounce_until: Option<Instant>,
 }
 
 impl MtcState {
@@ -127,6 +128,7 @@ impl MtcState {
             running: false,
             play_start: Instant::now(),
             last_enabled: false,
+            start_debounce_until: None,
         }
     }
 
@@ -217,6 +219,7 @@ pub async fn run(
             ms.qf_index = 0;
             ms.play_start = Instant::now();
             ms.last_qf_time = Instant::now();
+            ms.start_debounce_until = Some(Instant::now() + Duration::from_millis(100));
 
             // Send full-frame at timecode 00:00:00:00 on start.
             let tc = Timecode::zero();
@@ -229,8 +232,14 @@ pub async fn run(
             }
             tracing::debug!(timecode = %tc, "MTC started — full frame sent");
         } else if (!is_playing || bpm <= 0.0) && ms.running {
-            ms.running = false;
-            tracing::debug!("MTC stopped — master not playing");
+            let can_stop = ms.start_debounce_until
+                .map(|until| Instant::now() > until)
+                .unwrap_or(true);
+            if can_stop || bpm <= 0.0 {
+                ms.running = false;
+                ms.start_debounce_until = None;
+                tracing::debug!("MTC stopped — master not playing");
+            }
         }
 
         if !ms.running {

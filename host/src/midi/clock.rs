@@ -125,13 +125,8 @@ fn apply_phase_correction(cs: &mut ClockState, beat_at: Instant) {
 fn handle_beat_event(cs: &mut ClockState, state: &SharedState, evt: BeatEvent) {
     match evt {
         BeatEvent::Beat(bp) => {
-            // Start clock on downbeat (beat_in_bar == 1) when waiting for downbeat
             if cs.waiting_for_downbeat && bp.beat_in_bar == 1 {
                 cs.waiting_for_downbeat = false;
-                cs.running = true;
-                cs.pulse_index = 0;
-                cs.last_pulse = Instant::now();
-                cs.has_started = true;
             }
 
             let master_num = state.read().master.device_number;
@@ -151,13 +146,8 @@ fn handle_beat_event(cs: &mut ClockState, state: &SharedState, evt: BeatEvent) {
             }
         }
         BeatEvent::LinkBeat { bpm, beat_in_bar, .. } => {
-            // Start clock on downbeat (beat_in_bar == 1) when waiting for downbeat
             if cs.waiting_for_downbeat && beat_in_bar == 1 {
                 cs.waiting_for_downbeat = false;
-                cs.running = true;
-                cs.pulse_index = 0;
-                cs.last_pulse = Instant::now();
-                cs.has_started = true;
             }
 
             cs.set_bpm(bpm);
@@ -267,7 +257,7 @@ pub async fn run(
         };
 
         // ── Start / Stop / Continue messages ─────────────────────────────────
-        if clock_enabled && is_playing && !cs.running {
+        if clock_enabled && is_playing && !cs.running && !cs.waiting_for_downbeat {
             cs.running = true;
             cs.pulse_index = 0;
             cs.last_pulse = Instant::now();
@@ -485,7 +475,7 @@ mod tests {
             is_playing: true,
             ..Default::default()
         };
-        let (_beat_tx, beat_rx) = broadcast::channel(8);
+        let (beat_tx, beat_rx) = broadcast::channel(8);
         let activity = Arc::new(Mutex::new(MidiActivity::default()));
 
         let handle = tokio::spawn(run(midi_transport, state, beat_rx, cfg.clone(), activity));
@@ -494,7 +484,16 @@ mod tests {
         assert!(midi.get_messages().is_empty());
 
         cfg.write().midi.clock_enabled = true;
-        tokio::time::sleep(Duration::from_millis(80)).await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(midi.get_messages().is_empty());
+
+        let _ = beat_tx.send(BeatEvent::LinkBeat {
+            bpm: 120.0,
+            beat_in_bar: 1,
+            bar_phase: 0.0,
+            beat_phase: 0.0,
+        });
+        tokio::time::sleep(Duration::from_millis(60)).await;
         let messages = midi.get_messages();
         assert!(messages.contains(&vec![MSG_START]));
         assert!(messages.contains(&vec![MSG_CLOCK]));
@@ -629,8 +628,6 @@ mod tests {
 
         handle_beat_event(&mut cs, &state, make_beat_with_bar(1, 120.0, 1));
 
-        assert!(cs.running);
-        assert_eq!(cs.pulse_index, 0);
         assert!(!cs.waiting_for_downbeat);
     }
 
@@ -652,8 +649,6 @@ mod tests {
             },
         );
 
-        assert!(cs.running);
-        assert_eq!(cs.pulse_index, 0);
         assert!(!cs.waiting_for_downbeat);
     }
 
