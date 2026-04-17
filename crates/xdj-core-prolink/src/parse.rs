@@ -1,0 +1,163 @@
+use crate::{
+    bpm_from_raw, effective_bpm, pitch_to_percent, AbsPositionPacket, BeatPacket, CdjStatus,
+    KeepAlive, MixerStatus, MAGIC, PKT_ABS_POSITION, PKT_BEAT, PKT_CDJ_STATUS, PKT_KEEPALIVE,
+    PKT_MIXER_STATUS,
+};
+
+#[inline]
+fn u16be(b: &[u8], off: usize) -> u16 {
+    u16::from_be_bytes([b[off], b[off + 1]])
+}
+
+#[inline]
+fn u32be(b: &[u8], off: usize) -> u32 {
+    u32::from_be_bytes([b[off], b[off + 1], b[off + 2], b[off + 3]])
+}
+
+#[inline]
+fn i32be(b: &[u8], off: usize) -> i32 {
+    i32::from_be_bytes([b[off], b[off + 1], b[off + 2], b[off + 3]])
+}
+
+#[inline]
+pub fn has_magic(data: &[u8]) -> bool {
+    data.len() >= 11 && data[..10] == MAGIC
+}
+
+fn device_name(data: &[u8]) -> alloc::string::String {
+    if data.len() < 0x20 {
+        alloc::string::String::new()
+    } else {
+        let raw = &data[0x0c..0x20];
+        let end = raw.iter().position(|&b| b == 0).unwrap_or(20);
+        let s = core::str::from_utf8(&raw[..end]).unwrap_or("");
+        alloc::string::String::from(s)
+    }
+}
+
+pub fn parse_keepalive(data: &[u8]) -> Option<KeepAlive> {
+    if data.len() < 0x36 {
+        return None;
+    }
+    if !has_magic(data) || data[0x0a] != PKT_KEEPALIVE {
+        return None;
+    }
+    let mac = data[0x26..0x2c].try_into().ok()?;
+    let ip = data[0x2c..0x30].try_into().ok()?;
+    Some(KeepAlive {
+        device_number: data[0x24],
+        device_type: data[0x25],
+        name: device_name(data),
+        mac,
+        ip,
+        peer_count: data[0x31],
+    })
+}
+
+pub fn parse_beat(data: &[u8]) -> Option<BeatPacket> {
+    if data.len() < 0x60 {
+        return None;
+    }
+    if !has_magic(data) || data[0x0a] != PKT_BEAT {
+        return None;
+    }
+    let bpm_raw = u16be(data, 0x5a);
+    let pitch_raw = u32be(data, 0x54);
+    let track_bpm = bpm_from_raw(bpm_raw);
+    let eff_bpm = if let Some(b) = track_bpm {
+        effective_bpm(b, pitch_raw)
+    } else {
+        0.0
+    };
+    Some(BeatPacket {
+        device_number: data[0x21],
+        next_beat_ms: u32be(data, 0x24),
+        second_beat_ms: u32be(data, 0x28),
+        next_bar_ms: u32be(data, 0x2c),
+        pitch_raw,
+        bpm_raw,
+        beat_in_bar: data[0x5c],
+        track_bpm,
+        effective_bpm: eff_bpm,
+        pitch_pct: pitch_to_percent(pitch_raw),
+    })
+}
+
+pub fn parse_abs_position(data: &[u8]) -> Option<AbsPositionPacket> {
+    if data.len() < 0x40 {
+        return None;
+    }
+    if !has_magic(data) || data[0x0a] != PKT_ABS_POSITION {
+        return None;
+    }
+    let bpm_x10 = u32be(data, 0x3a);
+    let pitch_raw = i32be(data, 0x2c);
+    Some(AbsPositionPacket {
+        device_number: data[0x21],
+        track_length_s: u32be(data, 0x24),
+        playhead_ms: u32be(data, 0x28),
+        pitch_raw_signed: pitch_raw,
+        bpm_x10,
+        effective_bpm: bpm_x10 as f64 / 10.0,
+        pitch_pct: pitch_raw as f64 / 100.0,
+    })
+}
+
+pub fn parse_cdj_status(data: &[u8]) -> Option<CdjStatus> {
+    if data.len() < 0xd4 {
+        return None;
+    }
+    if !has_magic(data) || data[0x0a] != PKT_CDJ_STATUS {
+        return None;
+    }
+    let state = u16be(data, 0x88);
+    let is_master = state & 0x0020 != 0;
+    let is_sync = state & 0x0010 != 0;
+    let is_on_air = state & 0x0008 != 0;
+    let is_playing_flag = state & 0x0040 != 0;
+    let pitch_raw = u32be(data, 0x98);
+    let bpm_raw = u16be(data, 0x92);
+    let track_bpm = bpm_from_raw(bpm_raw);
+    let eff_bpm = if let Some(b) = track_bpm {
+        effective_bpm(b, pitch_raw)
+    } else {
+        0.0
+    };
+    Some(CdjStatus {
+        device_number: data[0x21],
+        play_state: crate::types::PlayState::from(data[0x7b]),
+        is_master,
+        is_sync,
+        is_on_air,
+        is_playing_flag,
+        pitch_raw,
+        bpm_raw,
+        track_bpm,
+        effective_bpm: eff_bpm,
+        pitch_pct: pitch_to_percent(pitch_raw),
+        beat_count: u32be(data, 0xa0),
+        beat_in_bar: data[0xa6],
+        track_source_player: data[0x28],
+        track_slot: data[0x29],
+        track_type: data[0x2a],
+        rekordbox_id: u32be(data, 0x2c),
+    })
+}
+
+pub fn parse_mixer_status(data: &[u8]) -> Option<MixerStatus> {
+    if data.len() < 0x38 {
+        return None;
+    }
+    if !has_magic(data) || data[0x0a] != PKT_MIXER_STATUS {
+        return None;
+    }
+    let state = u16be(data, 0x26);
+    let bpm_raw = u16be(data, 0x2e);
+    Some(MixerStatus {
+        device_number: data[0x21],
+        is_master: state & 0x0020 != 0,
+        bpm_raw,
+        track_bpm: bpm_from_raw(bpm_raw),
+        beat_in_bar: data[0x37],
+    })
+}
