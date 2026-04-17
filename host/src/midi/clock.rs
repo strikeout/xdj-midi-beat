@@ -45,10 +45,10 @@ struct ClockState {
     running: bool,
     /// Whether the clock has been started at least once (for Continue vs Start).
     has_started: bool,
-    /// Whether we're waiting for a beat to align before starting.
-    pending_start: bool,
     /// BPM at last update (used to detect changes).
     last_bpm: f64,
+    /// Whether we're waiting for a downbeat before sending clock pulses.
+    waiting_for_downbeat: bool,
 }
 
 impl ClockState {
@@ -59,8 +59,8 @@ impl ClockState {
             pulse_index: 0,
             running: false,
             has_started: false,
-            pending_start: false,
             last_bpm: 0.0,
+            waiting_for_downbeat: false,
         }
     }
 
@@ -123,16 +123,17 @@ fn apply_phase_correction(cs: &mut ClockState, beat_at: Instant) {
 
 /// Process a single beat event, updating clock BPM and phase correction.
 fn handle_beat_event(cs: &mut ClockState, state: &SharedState, evt: BeatEvent) {
-    if cs.pending_start {
-        cs.pending_start = false;
-        cs.running = true;
-        cs.pulse_index = 0;
-        cs.last_pulse = Instant::now();
-        cs.has_started = true;
-    }
-
     match evt {
         BeatEvent::Beat(bp) => {
+            // Start clock on downbeat (beat_in_bar == 1) when waiting for downbeat
+            if cs.waiting_for_downbeat && bp.beat_in_bar == 1 {
+                cs.waiting_for_downbeat = false;
+                cs.running = true;
+                cs.pulse_index = 0;
+                cs.last_pulse = Instant::now();
+                cs.has_started = true;
+            }
+
             let master_num = state.read().master.device_number;
             if bp.device_number == master_num || master_num == 0 {
                 cs.set_bpm(bp.effective_bpm);
@@ -149,7 +150,16 @@ fn handle_beat_event(cs: &mut ClockState, state: &SharedState, evt: BeatEvent) {
                 cs.set_bpm(ap.effective_bpm);
             }
         }
-        BeatEvent::LinkBeat { bpm, .. } => {
+        BeatEvent::LinkBeat { bpm, beat_in_bar, .. } => {
+            // Start clock on downbeat (beat_in_bar == 1) when waiting for downbeat
+            if cs.waiting_for_downbeat && beat_in_bar == 1 {
+                cs.waiting_for_downbeat = false;
+                cs.running = true;
+                cs.pulse_index = 0;
+                cs.last_pulse = Instant::now();
+                cs.has_started = true;
+            }
+
             cs.set_bpm(bpm);
             apply_phase_correction(cs, Instant::now());
         }
@@ -199,8 +209,8 @@ pub async fn run(
                     tracing::info!("MIDI clock disabled at runtime");
                 }
             } else {
-                tracing::info!("MIDI clock enabled at runtime, waiting for beat alignment");
-                cs.pending_start = true;
+                tracing::info!("MIDI clock enabled at runtime, waiting for downbeat");
+                cs.waiting_for_downbeat = true;
             }
         }
 
@@ -303,6 +313,10 @@ mod tests {
     use std::time::Duration;
 
     fn make_beat(device_number: u8, effective_bpm: f64) -> BeatEvent {
+        make_beat_with_bar(device_number, effective_bpm, 1)
+    }
+
+    fn make_beat_with_bar(device_number: u8, effective_bpm: f64, beat_in_bar: u8) -> BeatEvent {
         BeatEvent::Beat(crate::prolink::packets::BeatPacket {
             device_number,
             next_beat_ms: 0,
@@ -310,7 +324,7 @@ mod tests {
             next_bar_ms: 0,
             pitch_raw: crate::prolink::PITCH_NORMAL,
             bpm_raw: (effective_bpm * 100.0) as u16,
-            beat_in_bar: 1,
+            beat_in_bar,
             track_bpm: Some(effective_bpm),
             effective_bpm,
             pitch_pct: 0.0,
@@ -579,5 +593,80 @@ mod tests {
         }
 
         assert_eq!(total_error, 1000);
+    }
+
+    #[test]
+    fn waiting_for_downbeat_set_on_enable() {
+        let mut cs = ClockState::new();
+        assert!(!cs.waiting_for_downbeat);
+        cs.waiting_for_downbeat = true;
+        assert!(cs.waiting_for_downbeat);
+    }
+
+    #[test]
+    fn clock_does_not_start_on_non_downbeat() {
+        let mut cs = ClockState::new();
+        cs.waiting_for_downbeat = true;
+        cs.running = false;
+        let state = crate::state::new_shared(30);
+
+        handle_beat_event(&mut cs, &state, make_beat_with_bar(1, 120.0, 2));
+        assert!(!cs.running);
+
+        handle_beat_event(&mut cs, &state, make_beat_with_bar(1, 120.0, 3));
+        assert!(!cs.running);
+
+        handle_beat_event(&mut cs, &state, make_beat_with_bar(1, 120.0, 4));
+        assert!(!cs.running);
+    }
+
+    #[test]
+    fn clock_starts_on_downbeat() {
+        let mut cs = ClockState::new();
+        cs.waiting_for_downbeat = true;
+        cs.running = false;
+        let state = crate::state::new_shared(30);
+
+        handle_beat_event(&mut cs, &state, make_beat_with_bar(1, 120.0, 1));
+
+        assert!(cs.running);
+        assert_eq!(cs.pulse_index, 0);
+        assert!(!cs.waiting_for_downbeat);
+    }
+
+    #[test]
+    fn linkbeat_starts_on_downbeat() {
+        let mut cs = ClockState::new();
+        cs.waiting_for_downbeat = true;
+        cs.running = false;
+        let state = crate::state::new_shared(30);
+
+        handle_beat_event(
+            &mut cs,
+            &state,
+            BeatEvent::LinkBeat {
+                bpm: 128.0,
+                beat_in_bar: 1,
+                bar_phase: 0.0,
+                beat_phase: 0.0,
+            },
+        );
+
+        assert!(cs.running);
+        assert_eq!(cs.pulse_index, 0);
+        assert!(!cs.waiting_for_downbeat);
+    }
+
+    #[test]
+    fn abs_position_does_not_start_clock() {
+        let mut cs = ClockState::new();
+        cs.waiting_for_downbeat = true;
+        cs.running = false;
+        let state = crate::state::new_shared(30);
+
+        handle_beat_event(&mut cs, &state, make_abs_position(1, 120.0, 5000));
+
+        assert!(!cs.running);
+        assert!(cs.waiting_for_downbeat);
     }
 }
