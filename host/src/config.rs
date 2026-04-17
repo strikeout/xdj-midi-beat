@@ -24,18 +24,18 @@ pub enum Source {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct Config {
-    /// Beat/tempo source: "prolink", "link", or "auto".
     pub source: Source,
-    /// Network interface to bind to ("auto" or an interface name).
     pub interface: String,
-    /// Virtual CDJ device number (1-15; use 7+ to avoid conflicts).
     pub device_number: u8,
-    /// Name broadcast on the Pro DJ Link network (max 16 ASCII bytes).
     pub device_name: String,
-    /// MIDI configuration.
     pub midi: MidiConfig,
-    /// Ableton Link configuration.
     pub link: LinkConfig,
+    #[serde(skip)]
+    pub bind_ip: std::net::Ipv4Addr,
+    #[serde(skip)]
+    pub bcast_ip: std::net::Ipv4Addr,
+    #[serde(skip)]
+    pub mac: [u8; 6],
 }
 
 pub type SharedConfig = Arc<RwLock<Config>>;
@@ -53,6 +53,9 @@ impl Default for Config {
             device_name: "xdj-clock".into(),
             midi: MidiConfig::default(),
             link: LinkConfig::default(),
+            bind_ip: std::net::Ipv4Addr::new(0, 0, 0, 0),
+            bcast_ip: std::net::Ipv4Addr::new(255, 255, 255, 255),
+            mac: [0, 0, 0, 0, 0, 0],
         }
     }
 }

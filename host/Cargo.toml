@@ -25,3 +25,4 @@ crossterm = { version = "0.29", features = ["event-stream"] }
 tokio-stream = "0.1"
 
 rusty_link = "0.2"
+xdj-core-prolink = { path = "../crates/xdj-core-prolink" }

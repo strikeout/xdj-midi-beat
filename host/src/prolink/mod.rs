@@ -1,4 +1,7 @@
 //! Pro DJ Link protocol — constants, packet types, and zero-copy parsing.
+//!
+//! Protocol constants and math helpers are shared via `xdj_core_prolink`.
+//! Listener tasks, packet builders, and metadata fetching remain host-specific.
 
 pub mod discovery;
 pub mod packets;
@@ -15,27 +18,22 @@ pub const MAGIC: [u8; 10] = [0x51, 0x73, 0x70, 0x74, 0x31, 0x57, 0x6d, 0x4a, 0x4
 
 // ── Ports ─────────────────────────────────────────────────────────────────────
 
-pub const PORT_DISCOVERY: u16 = 50000; // device announce / keep-alive
-pub const PORT_BEAT: u16 = 50001;      // beat packets, fader-start, on-air
-pub const PORT_STATUS: u16 = 50002;    // CDJ / mixer detailed status
+pub const PORT_DISCOVERY: u16 = 50000;
+pub const PORT_BEAT: u16 = 50001;
+pub const PORT_STATUS: u16 = 50002;
 
 // ── Packet type byte (offset 0x0a) ────────────────────────────────────────────
 
-// Port 50000 types
-pub const PKT_ANNOUNCE: u8 = 0x0a;       // initial device announcement
-pub const PKT_CLAIM1: u8 = 0x00;         // first-stage channel claim
-pub const PKT_CLAIM2: u8 = 0x02;         // second-stage channel claim
-pub const PKT_CLAIM_FINAL: u8 = 0x04;    // final-stage channel claim
-pub const PKT_KEEPALIVE: u8 = 0x06;      // keep-alive (every ~1500 ms)
-pub const PKT_CONFLICT: u8 = 0x08;       // channel number conflict
-
-// Port 50001 types
-pub const PKT_BEAT: u8 = 0x28;           // beat packet
-pub const PKT_ABS_POSITION: u8 = 0x0b;  // CDJ-3000 absolute position
-
-// Port 50002 types
-pub const PKT_CDJ_STATUS: u8 = 0x0a;    // detailed CDJ status
-pub const PKT_MIXER_STATUS: u8 = 0x29;  // mixer status
+pub const PKT_ANNOUNCE: u8 = 0x0a;
+pub const PKT_CLAIM1: u8 = 0x00;
+pub const PKT_CLAIM2: u8 = 0x02;
+pub const PKT_CLAIM_FINAL: u8 = 0x04;
+pub const PKT_KEEPALIVE: u8 = 0x06;
+pub const PKT_CONFLICT: u8 = 0x08;
+pub const PKT_BEAT: u8 = 0x28;
+pub const PKT_ABS_POSITION: u8 = 0x0b;
+pub const PKT_CDJ_STATUS: u8 = 0x0a;
+pub const PKT_MIXER_STATUS: u8 = 0x29;
 
 // ── Device types ──────────────────────────────────────────────────────────────
 
@@ -46,13 +44,11 @@ pub const DEV_MIXER: u8 = 0x01;
 
 // ── Special device numbers ────────────────────────────────────────────────────
 
-/// Mixer is always device 0x21 (33).
 #[allow(dead_code)]
 pub const DN_MIXER: u8 = 0x21;
 
 // ── Pitch encoding ────────────────────────────────────────────────────────────
 
-/// Pitch value meaning 0% (normal speed) in beat/status packets.
 pub const PITCH_NORMAL: u32 = 0x0010_0000;
 
 /// Convert a 4-byte pitch field to a percentage (-100.0 … +100.0).
@@ -70,7 +66,6 @@ pub fn percent_to_pitch(pct: f64) -> u32 {
 
 // ── BPM helpers ───────────────────────────────────────────────────────────────
 
-/// No BPM available (track not loaded / not analysed).
 pub const BPM_NONE: u16 = 0xFFFF;
 
 /// Convert raw BPM field (BPM × 100) to f64.
@@ -91,11 +86,10 @@ pub fn effective_bpm(track_bpm: f64, pitch_raw: u32) -> f64 {
 
 // ── Beat constants ────────────────────────────────────────────────────────────
 
-/// Beat counter unavailable.
 #[allow(dead_code)]
 pub const BEAT_NONE: u32 = 0xFFFF_FFFF;
 
-// ── Debug helpers ─────────────────────────────────────────────────────────────
+// ── Debug helpers ──────────────────────────────────────────────────────────────
 
 /// Format the first `n` bytes of a packet as a hex string for TRACE logging.
 pub fn hex_preview(data: &[u8], n: usize) -> String {
@@ -106,6 +100,11 @@ pub fn hex_preview(data: &[u8], n: usize) -> String {
         .join(" ")
 }
 
+// ── Host-only socket creation ────────────────────────────────────────────────
+
+/// Create a UDP socket bound to the given port with SO_REUSEADDR (and
+/// SO_REUSEPORT on Unix).  This is host-only because it uses `socket2`
+/// and `std::net` which are not available on ESP32.
 #[allow(dead_code)]
 pub fn create_reuse_socket(port: u16) -> anyhow::Result<std::net::UdpSocket> {
     use socket2::{Domain, Protocol, Socket, Type};

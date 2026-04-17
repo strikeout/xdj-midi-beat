@@ -369,7 +369,7 @@ impl TuiState {
                         continue;
                     }
 
-                    let priority = crate::interface_priority(&iface.name, ip);
+                    let priority = crate::app::interface_priority(&iface.name, ip);
                     self.interfaces.push(NetworkIfaceInfo {
                         name: iface.name.clone(),
                         ip: ip.to_string(),

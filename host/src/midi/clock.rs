@@ -279,3 +279,145 @@ pub async fn run(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_beat(device_number: u8, effective_bpm: f64) -> BeatEvent {
+        BeatEvent::Beat(crate::prolink::packets::BeatPacket {
+            device_number,
+            next_beat_ms: 0,
+            second_beat_ms: 0,
+            next_bar_ms: 0,
+            pitch_raw: crate::prolink::PITCH_NORMAL,
+            bpm_raw: (effective_bpm * 100.0) as u16,
+            beat_in_bar: 1,
+            track_bpm: Some(effective_bpm),
+            effective_bpm,
+            pitch_pct: 0.0,
+        })
+    }
+
+    fn make_abs_position(device_number: u8, effective_bpm: f64, playhead_ms: u32) -> BeatEvent {
+        BeatEvent::AbsPosition(crate::prolink::packets::AbsPositionPacket {
+            device_number,
+            track_length_s: 180,
+            playhead_ms,
+            pitch_raw_signed: 0,
+            bpm_x10: (effective_bpm * 10.0) as u32,
+            effective_bpm,
+            pitch_pct: 0.0,
+        })
+    }
+
+    #[test]
+    fn bpm_to_interval_ns_exact() {
+        let ns = bpm_to_interval_ns(120.0);
+        let expected: u64 = (60.0e9_f64 / (120.0 * 24.0)).round() as u64;
+        assert_eq!(ns, expected);
+    }
+
+    #[test]
+    fn bpm_to_interval_ns_at_140() {
+        let ns = bpm_to_interval_ns(140.0);
+        let expected: u64 = (60.0e9_f64 / (140.0 * 24.0)).round() as u64;
+        assert_eq!(ns, expected);
+    }
+
+    #[test]
+    fn clock_state_starts_idle() {
+        let cs = ClockState::new();
+        assert!(!cs.running);
+        assert!(!cs.has_started);
+        assert_eq!(cs.last_bpm, 0.0);
+    }
+
+    #[test]
+    fn clock_state_set_bpm_updates_interval() {
+        let mut cs = ClockState::new();
+        assert!(cs.last_bpm != 120.0);
+        cs.set_bpm(120.0);
+        assert_eq!(cs.interval_ns, bpm_to_interval_ns(120.0));
+        assert_eq!(cs.last_bpm, 120.0);
+    }
+
+    #[test]
+    fn clock_state_set_bpm_ignores_small_change() {
+        let mut cs = ClockState::new();
+        cs.set_bpm(120.0);
+        let interval_after_120 = cs.interval_ns;
+        cs.set_bpm(120.005);
+        assert_eq!(cs.interval_ns, interval_after_120);
+    }
+
+    #[test]
+    fn phase_correction_snaps_pulse_index_to_zero() {
+        let mut cs = ClockState::new();
+        cs.interval_ns = 1_000_000;
+        cs.pulse_index = 5;
+        let beat_at = Instant::now() + Duration::from_millis(1);
+        apply_phase_correction(&mut cs, beat_at);
+        assert_eq!(cs.pulse_index, 0);
+    }
+
+    #[test]
+    fn handle_beat_event_sets_bpm_from_master_beat() {
+        let mut cs = ClockState::new();
+        let state = crate::state::new_shared(30);
+        state.write().master.device_number = 2;
+
+        handle_beat_event(&mut cs, &state, make_beat(2, 128.0));
+        assert!((cs.last_bpm - 128.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn handle_beat_event_ignores_non_master_when_master_set() {
+        let mut cs = ClockState::new();
+        cs.interval_ns = bpm_to_interval_ns(100.0);
+        cs.last_bpm = 100.0;
+        let state = crate::state::new_shared(30);
+        state.write().master.device_number = 2;
+
+        handle_beat_event(&mut cs, &state, make_beat(1, 130.0));
+        assert!((cs.last_bpm - 100.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn handle_beat_event_accepts_any_device_when_no_master() {
+        let mut cs = ClockState::new();
+        let state = crate::state::new_shared(30);
+        state.write().master.device_number = 0;
+
+        handle_beat_event(&mut cs, &state, make_beat(3, 135.0));
+        assert!((cs.last_bpm - 135.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn handle_beat_event_abs_position_updates_bpm() {
+        let mut cs = ClockState::new();
+        let state = crate::state::new_shared(30);
+        state.write().master.device_number = 5;
+
+        handle_beat_event(&mut cs, &state, make_abs_position(5, 124.0, 5000));
+        assert!((cs.last_bpm - 124.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn handle_beat_event_link_beat_updates_bpm() {
+        let mut cs = ClockState::new();
+        let state = crate::state::new_shared(30);
+
+        handle_beat_event(
+            &mut cs,
+            &state,
+            BeatEvent::LinkBeat {
+                bpm: 122.0,
+                beat_in_bar: 1,
+                bar_phase: 0.0,
+                beat_phase: 0.0,
+            },
+        );
+        assert!((cs.last_bpm - 122.0).abs() < 0.01);
+    }
+}
