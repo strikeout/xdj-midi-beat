@@ -192,16 +192,16 @@ impl EmulatorState {
             return;
         }
 
-        if &data[..10] != xdj_clock_host::prolink::MAGIC {
+        if &data[..10] != xdj_core_prolink::MAGIC {
             return;
         }
 
         let pkt_type = data[10];
 
         match port {
-            xdj_clock_host::prolink::PORT_DISCOVERY => self.handle_discovery_packet(addr, pkt_type, data),
-            xdj_clock_host::prolink::PORT_BEAT => self.handle_beat_packet(addr, pkt_type, data),
-            xdj_clock_host::prolink::PORT_STATUS => self.handle_status_packet(addr, pkt_type, data),
+            xdj_core_prolink::PORT_DISCOVERY => self.handle_discovery_packet(addr, pkt_type, data),
+            xdj_core_prolink::PORT_BEAT => self.handle_beat_packet(addr, pkt_type, data),
+            xdj_core_prolink::PORT_STATUS => self.handle_status_packet(addr, pkt_type, data),
             _ => {}
         }
 
@@ -209,9 +209,9 @@ impl EmulatorState {
     }
 
     fn handle_discovery_packet(&mut self, addr: SocketAddr, pkt_type: u8, data: &[u8]) {
-        use xdj_clock_host::prolink::packets;
+        use xdj_core_prolink::parse as packets;
         match pkt_type {
-            xdj_clock_host::prolink::PKT_KEEPALIVE => {
+            xdj_core_prolink::PKT_KEEPALIVE => {
                 if let Some(ka) = packets::parse_keepalive(data) {
                     let type_name = if ka.device_number == 33 {
                         "Mixer"
@@ -244,7 +244,7 @@ impl EmulatorState {
                     }
                 }
             }
-            xdj_clock_host::prolink::PKT_ANNOUNCE => {
+            xdj_core_prolink::PKT_ANNOUNCE => {
                 if data.len() >= 12 {
                     let device_num = data[11];
                     self.add_log(2, "DEBUG", format!("Announce #{}", device_num));
@@ -264,9 +264,9 @@ impl EmulatorState {
     }
 
     fn handle_beat_packet(&mut self, _addr: SocketAddr, pkt_type: u8, data: &[u8]) {
-        use xdj_clock_host::prolink::packets;
+        use xdj_core_prolink::parse as packets;
         match pkt_type {
-            xdj_clock_host::prolink::PKT_BEAT => {
+            xdj_core_prolink::PKT_BEAT => {
                 if let Some(beat) = packets::parse_beat(data) {
                     if let Some(idx) = self.find_deck(beat.device_number) {
                         self.decks[idx].bpm = beat.effective_bpm;
@@ -296,7 +296,7 @@ impl EmulatorState {
                     self.add_log(2, "DEBUG", format!("Beat #{} bpm={:.2} beat={}/4", beat.device_number, beat.effective_bpm, beat.beat_in_bar));
                 }
             }
-            xdj_clock_host::prolink::PKT_ABS_POSITION => {
+            xdj_core_prolink::PKT_ABS_POSITION => {
                 if let Some(abs) = packets::parse_abs_position(data) {
                     if let Some(idx) = self.find_deck(abs.device_number) {
                         self.decks[idx].bpm = abs.effective_bpm;
@@ -317,9 +317,9 @@ impl EmulatorState {
     }
 
     fn handle_status_packet(&mut self, _addr: SocketAddr, pkt_type: u8, data: &[u8]) {
-        use xdj_clock_host::prolink::packets;
+        use xdj_core_prolink::parse as packets;
         match pkt_type {
-            xdj_clock_host::prolink::PKT_CDJ_STATUS => {
+            xdj_core_prolink::PKT_CDJ_STATUS => {
                 if let Some(s) = packets::parse_cdj_status(data) {
                     if let Some(idx) = self.find_deck(s.device_number) {
                         self.decks[idx].is_playing = s.play_state.is_playing() || s.is_playing_flag;
@@ -347,7 +347,7 @@ impl EmulatorState {
                     self.add_log(0, "INFO", format!("Status #{} {} bpm={:.2}{} (beat={})", s.device_number, playing_str, s.effective_bpm, master_str, s.beat_in_bar));
                 }
             }
-            xdj_clock_host::prolink::PKT_MIXER_STATUS => {
+            xdj_core_prolink::PKT_MIXER_STATUS => {
                 if let Some(s) = packets::parse_mixer_status(data) {
                     if let Some(idx) = self.find_deck(s.device_number) {
                         self.decks[idx].last_seen = std::time::Instant::now();
@@ -491,7 +491,15 @@ pub async fn run_emulator() -> Result<()> {
     println!("╚══════════════════════════════════════════╝");
 
     fn create_reuse_socket(port: u16, broadcast: bool) -> Result<tokio::net::UdpSocket> {
-        let std_sock = xdj_clock_host::prolink::create_reuse_socket(port)?;
+        use socket2::{Domain, Protocol, Socket, Type};
+        use std::net::{Ipv4Addr, SocketAddrV4};
+
+        let raw = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
+        raw.set_reuse_address(true)?;
+        raw.set_nonblocking(true)?;
+        let bind_addr = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port);
+        raw.bind(&bind_addr.into())?;
+        let std_sock = std::net::UdpSocket::from(raw);
         if broadcast {
             std_sock.set_broadcast(true)?;
         }
@@ -541,10 +549,10 @@ pub async fn run_emulator() -> Result<()> {
     let state_part = Arc::clone(&state);
     let sock_part = Arc::clone(&sock_50000);
     tokio::spawn(async move {
-        use xdj_clock_host::prolink::builder;
+        use xdj_core_prolink::build;
         let mut interval = interval(Duration::from_millis(1500));
         let mac = [0x02, 0xAB, 0xCD, 0xEF, 0x01, 0x02];
-        let name = builder::pad_name("xdj-clock-emu");
+        let name = build::pad_name("xdj-clock-emu");
         
         loop {
             interval.tick().await;
@@ -554,13 +562,13 @@ pub async fn run_emulator() -> Result<()> {
             // 1. Broadcast keep-alive
             // We use 10.10.10.50 as our IP in the packet for the emulator
             let my_ip = [10, 10, 10, 50];
-            let ka_pkt = builder::build_keepalive(&name, dev_num, &mac, &my_ip, 1);
+            let ka_pkt = build::build_keepalive(&name, dev_num, &mac, &my_ip, 1);
             if let Err(e) = sock_part.send_to(&ka_pkt, "255.255.255.255:50000").await {
                 eprintln!("Failed to send keep-alive: {}", e);
             }
             
             // 2. Unicast status template to all discovered decks on port 50002
-            let status_pkt = builder::build_status_packet(&name, dev_num);
+            let status_pkt = build::build_status_packet(&name, dev_num);
             for deck in s.decks.iter().filter(|d| d.device_number != 0 && d.ip.is_some()) {
                 if let Some(ip) = deck.ip {
                     let addr = SocketAddr::from((ip, 50002));
