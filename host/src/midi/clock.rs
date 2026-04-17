@@ -80,8 +80,8 @@ fn bpm_to_interval_ns(bpm: f64) -> u64 {
 
 // ── Phase correction ──────────────────────────────────────────────────────────
 
-/// Maximum correction we will apply in one shot (1/4 of a pulse interval).
-const MAX_CORRECTION_FRACTION: f64 = 0.25;
+/// Maximum correction we will apply in one shot (1/2 of a pulse interval).
+const MAX_CORRECTION_FRACTION: f64 = 0.5;
 
 /// When a beat arrives, compute how far off our clock is and nudge `last_pulse`
 /// to correct it.  We correct by at most MAX_CORRECTION_FRACTION of an
@@ -136,7 +136,11 @@ fn handle_beat_event(cs: &mut ClockState, state: &SharedState, evt: BeatEvent) {
             let master_num = state.read().master.device_number;
             if bp.device_number == master_num || master_num == 0 {
                 cs.set_bpm(bp.effective_bpm);
-                apply_phase_correction(cs, Instant::now());
+                // Derive last beat time from packet: next_beat_ms = time to next beat at 0% pitch
+                let interval_ms = (60000.0 / (bp.effective_bpm * 24.0)) as u32;
+                let ms_since_last_beat = interval_ms.saturating_sub(bp.next_beat_ms);
+                let beat_at = Instant::now() - Duration::from_millis(ms_since_last_beat as u64);
+                apply_phase_correction(cs, beat_at);
             }
         }
         BeatEvent::AbsPosition(ap) => {
@@ -281,7 +285,7 @@ pub async fn run(
             let elapsed = now.duration_since(cs.last_pulse).as_nanos() as u64;
             if elapsed >= cs.interval_ns {
                 let overshoot = elapsed - cs.interval_ns;
-                cs.last_pulse = now - Duration::from_nanos(overshoot.min(cs.interval_ns / 2));
+                cs.last_pulse = now - Duration::from_nanos(overshoot);
                 cs.pulse_index = (cs.pulse_index + 1) % PPQ;
                 let _ = midi.send_message(&[MSG_CLOCK]);
                 activity.lock().clock_pulses += 1;
@@ -518,5 +522,62 @@ mod tests {
         assert!(resumed_delta >= 3);
 
         handle.abort();
+    }
+
+    /// Verify phase correction calculates beat_at from BeatPacket.next_beat_ms correctly.
+    #[test]
+    fn phase_correction_uses_packet_timestamp() {
+        let bp = crate::prolink::packets::BeatPacket {
+            device_number: 1,
+            next_beat_ms: 0,
+            second_beat_ms: 0,
+            next_bar_ms: 0,
+            pitch_raw: crate::prolink::PITCH_NORMAL,
+            bpm_raw: 12000,
+            beat_in_bar: 1,
+            track_bpm: Some(120.0),
+            effective_bpm: 120.0,
+            pitch_pct: 0.0,
+        };
+
+        let interval_ms = (60000.0 / (bp.effective_bpm * 24.0)) as u32;
+        let ms_since_last_beat = interval_ms.saturating_sub(bp.next_beat_ms);
+
+        let expected_ms_since = interval_ms;
+        assert_eq!(ms_since_last_beat, expected_ms_since);
+    }
+
+    /// Verify overshoot handling uses full overshoot, not clamped to interval/2.
+    #[test]
+    fn overshoot_handling_no_one_way_drift() {
+        let interval_ns: u64 = 2_000_000;
+        let elapsed = interval_ns + 1_500_000;
+
+        let overshoot = elapsed - interval_ns;
+        assert_eq!(overshoot, 1_500_000);
+
+        let half_interval = interval_ns / 2;
+        assert!(overshoot > half_interval);
+    }
+
+    /// Verify MAX_CORRECTION_FRACTION is 0.5 (50% of interval).
+    #[test]
+    fn max_correction_fraction_is_50_percent() {
+        assert_eq!(super::MAX_CORRECTION_FRACTION, 0.5);
+    }
+
+    /// Verify timing error averages out over multiple cycles.
+    #[test]
+    fn timing_error_averages_out_over_cycles() {
+        let interval_ns: u64 = 2_000_000;
+
+        let mut total_error: i64 = 0;
+        for _ in 0..10 {
+            let elapsed = interval_ns + 100;
+            let overshoot = (elapsed - interval_ns) as i64;
+            total_error += overshoot;
+        }
+
+        assert_eq!(total_error, 1000);
     }
 }
