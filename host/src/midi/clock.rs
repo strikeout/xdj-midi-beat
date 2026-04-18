@@ -12,10 +12,11 @@
 //! distributed through the beat interval.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 use tokio::sync::broadcast;
+use tokio::time;
 
 
 use crate::midi::MidiTransport;
@@ -74,21 +75,44 @@ impl ClockState {
 // ── Pulse scheduling ──────────────────────────────────────────────────────────
 
 /// Send 24 clock pulses distributed evenly through the beat interval.
-/// This runs synchronously within the beat event handler - beats come
-/// frequently enough (e.g., every 500ms at 120 BPM) that we can loop.
-fn schedule_pulses(
+/// Uses non-blocking tokio timers with exact timing from BeatPacket.
+/// This is an async function that schedules pulses at precise intervals.
+async fn schedule_pulses(
     cs: &mut ClockState,
     midi: &Arc<dyn MidiTransport>,
     activity: &Arc<Mutex<MidiActivity>>,
+    next_beat_ms: u32,
+    beat_in_bar: u8,
 ) {
-    let interval_ms = cs.beat_interval_ms / PPQ;
-    for i in 0..PPQ {
-        if i > 0 {
-            std::thread::sleep(Duration::from_millis(interval_ms));
+    let pulse_interval_ms = next_beat_ms as u64 / PPQ;
+    let pulse_interval = Duration::from_millis(pulse_interval_ms);
+    let now = Instant::now();
+
+    let next_beat_time = now + Duration::from_millis(next_beat_ms as u64);
+
+    let start_index: u64 = if beat_in_bar == 1 {
+        0
+    } else {
+        cs.pulse_index
+    };
+
+    for i in start_index..PPQ {
+        let pulse_time = next_beat_time + (pulse_interval * (i as u32));
+
+        let delay = if pulse_time > now {
+            pulse_time.duration_since(now)
+        } else {
+            Duration::ZERO
+        };
+
+        if delay > Duration::ZERO {
+            time::sleep(delay).await;
         }
+
         let _ = midi.send_message(&[MSG_CLOCK]);
         activity.lock().clock_pulses += 1;
     }
+
     cs.pulse_index = 0;
 }
 
@@ -97,7 +121,7 @@ fn schedule_pulses(
 /// Process a single beat event, updating clock BPM and scheduling pulses.
 /// This is the core of beat-synced clock: on each beat, immediately send
 /// 24 pulses distributed through the beat interval.
-fn handle_beat_event(
+async fn handle_beat_event(
     cs: &mut ClockState,
     state: &SharedState,
     midi: &Arc<dyn MidiTransport>,
@@ -121,7 +145,7 @@ fn handle_beat_event(
                 }
 
                 if cs.running {
-                    schedule_pulses(cs, midi, activity);
+                    schedule_pulses(cs, midi, activity, bp.next_beat_ms, bp.beat_in_bar).await;
                 }
             }
         }
@@ -145,7 +169,8 @@ fn handle_beat_event(
             }
 
             if cs.running {
-                schedule_pulses(cs, midi, activity);
+                let pulse_interval_ms = (60000.0 / bpm) as u32 / PPQ as u32;
+                schedule_pulses(cs, midi, activity, pulse_interval_ms * PPQ as u32, beat_in_bar).await;
             }
         }
     }
@@ -187,7 +212,7 @@ pub async fn run(
 
 // Wait for next beat event - this is the core beat-sync loop
         match beat_rx.recv().await {
-            Ok(evt) => handle_beat_event(&mut cs, &state, &midi, &activity, evt),
+            Ok(evt) => handle_beat_event(&mut cs, &state, &midi, &activity, evt).await,
             Err(broadcast::error::RecvError::Closed) => return,
             Err(broadcast::error::RecvError::Lagged(n)) => {
                 tracing::warn!("Beat event lagged, dropped {} events", n);
