@@ -53,28 +53,75 @@ impl LogBuffer {
 #[derive(Clone)]
 pub struct LogWriter {
     buf: LogBuffer,
+    partial: String,
 }
 
 impl LogWriter {
     pub fn new(buf: LogBuffer) -> Self {
-        Self { buf }
+        Self {
+            buf,
+            partial: String::new(),
+        }
     }
 }
 
 impl std::io::Write for LogWriter {
     fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
-        let s = String::from_utf8_lossy(data);
-        for line in s.lines() {
+        let chunk = String::from_utf8_lossy(data);
+        self.partial.push_str(&chunk);
+
+        let mut it = self.partial.split('\n').peekable();
+        let mut new_partial: Option<String> = None;
+
+        while let Some(part) = it.next() {
+            let is_last = it.peek().is_none();
+            if is_last {
+                new_partial = Some(part.to_string());
+                break;
+            }
+
+            let line = part.trim_end_matches('\r');
             let trimmed = line.trim_end();
             if !trimmed.is_empty() {
                 self.buf.push(trimmed.to_string());
             }
         }
+
+        self.partial = new_partial.unwrap_or_default();
         Ok(data.len())
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn log_buffer_clones_share_inner_ring() {
+        let a = LogBuffer::new();
+        let b = a.clone();
+
+        assert!(Arc::ptr_eq(&a.inner, &b.inner));
+
+        b.push("hello".to_string());
+        assert_eq!(a.lines(), vec!["hello".to_string()]);
+    }
+
+    #[test]
+    fn log_writer_buffers_partial_lines_until_newline() {
+        let buf = LogBuffer::new();
+        let mut w = LogWriter::new(buf.clone());
+
+        w.write_all(b"hello ").unwrap();
+        assert_eq!(buf.lines(), Vec::<String>::new());
+
+        w.write_all(b"world\n").unwrap();
+        assert_eq!(buf.lines(), vec!["hello world".to_string()]);
     }
 }
 
@@ -119,22 +166,42 @@ pub struct MidiPortInfo {
 #[derive(Debug, Clone)]
 pub struct MidiActivity {
     pub clock_pulses: u64,
+    pub mtc_quarter_frames: u64,
+    pub mtc_full_frames: u64,
     pub notes_sent: u64,
     pub cc_sent: u64,
     /// Last note-on fired: (note_number, when).
     pub last_note: Option<(u8, Instant)>,
     /// Last CC sent: (cc_number, value, when).
     pub last_cc: Option<(u8, u8, Instant)>,
+
+    pub clock_running: bool,
+    pub clock_waiting_for_phrase: bool,
+    pub clock_wait_beats_seen: u8,
+    pub clock_phrase_beat: u8,
+    pub clock_pulse_index: u64,
+    pub clock_last_start_at: Option<Instant>,
+    pub clock_last_pulse_at: Option<Instant>,
 }
 
 impl Default for MidiActivity {
     fn default() -> Self {
         Self {
             clock_pulses: 0,
+            mtc_quarter_frames: 0,
+            mtc_full_frames: 0,
             notes_sent: 0,
             cc_sent: 0,
             last_note: None,
             last_cc: None,
+
+            clock_running: false,
+            clock_waiting_for_phrase: false,
+            clock_wait_beats_seen: 0,
+            clock_phrase_beat: 0,
+            clock_pulse_index: 0,
+            clock_last_start_at: None,
+            clock_last_pulse_at: None,
         }
     }
 }
@@ -206,6 +273,11 @@ pub const SETTINGS: &[SettingDef] = &[
     SettingDef {
         label: "Latency Comp",
         kind: SettingKind::NumericI64,
+        section: None,
+    },
+    SettingDef {
+        label: "Phrase Lock Stable",
+        kind: SettingKind::NumericU8,
         section: None,
     },
     SettingDef {
@@ -518,27 +590,28 @@ pub fn get_value(cfg: &Config, interfaces: &[NetworkIfaceInfo], idx: usize) -> S
         }
         4 => format!("{} ms", cfg.midi.smoothing_ms),
         5 => format!("{} ms", cfg.midi.latency_compensation_ms),
-        6 => (cfg.midi.notes.channel + 1).to_string(),
-        7 => cfg.midi.notes.beat.to_string(),
-        8 => cfg.midi.notes.downbeat.to_string(),
-        9 => cfg.midi.notes.phrase_change.to_string(),
-        10 => (cfg.midi.cc.channel + 1).to_string(),
-        11 => cfg.midi.cc.bpm_coarse.to_string(),
-        12 => cfg.midi.cc.bpm_fine.to_string(),
-        13 => cfg.midi.cc.pitch.to_string(),
-        14 => cfg.midi.cc.bar_phase.to_string(),
-        15 => cfg.midi.cc.beat_phase.to_string(),
-        16 => cfg.midi.cc.playing.to_string(),
-        17 => cfg.midi.cc.master_deck.to_string(),
-        18 => cfg.midi.cc.phrase_16.to_string(),
-        19 => {
+        6 => format!("{} beats", cfg.midi.phrase_lock_stable_beats),
+        7 => (cfg.midi.notes.channel + 1).to_string(),
+        8 => cfg.midi.notes.beat.to_string(),
+        9 => cfg.midi.notes.downbeat.to_string(),
+        10 => cfg.midi.notes.phrase_change.to_string(),
+        11 => (cfg.midi.cc.channel + 1).to_string(),
+        12 => cfg.midi.cc.bpm_coarse.to_string(),
+        13 => cfg.midi.cc.bpm_fine.to_string(),
+        14 => cfg.midi.cc.pitch.to_string(),
+        15 => cfg.midi.cc.bar_phase.to_string(),
+        16 => cfg.midi.cc.beat_phase.to_string(),
+        17 => cfg.midi.cc.playing.to_string(),
+        18 => cfg.midi.cc.master_deck.to_string(),
+        19 => cfg.midi.cc.phrase_16.to_string(),
+        20 => {
             if cfg.midi.mtc.enabled {
                 "✓".to_string()
             } else {
                 "✗".to_string()
             }
         }
-        20 => cfg.midi.mtc.frame_rate.label().to_string(),
+        21 => cfg.midi.mtc.frame_rate.label().to_string(),
         _ => String::new(),
     }
 }
@@ -548,19 +621,20 @@ pub fn numeric_edit_value(cfg: &Config, idx: usize) -> Option<String> {
         SettingKind::NumericU8 | SettingKind::NumericU64 => Some(match idx {
             2 => cfg.device_number.to_string(),
             4 => cfg.midi.smoothing_ms.to_string(),
-            6 => (cfg.midi.notes.channel + 1).to_string(),
-            7 => cfg.midi.notes.beat.to_string(),
-            8 => cfg.midi.notes.downbeat.to_string(),
-            9 => cfg.midi.notes.phrase_change.to_string(),
-            10 => (cfg.midi.cc.channel + 1).to_string(),
-            11 => cfg.midi.cc.bpm_coarse.to_string(),
-            12 => cfg.midi.cc.bpm_fine.to_string(),
-            13 => cfg.midi.cc.pitch.to_string(),
-            14 => cfg.midi.cc.bar_phase.to_string(),
-            15 => cfg.midi.cc.beat_phase.to_string(),
-            16 => cfg.midi.cc.playing.to_string(),
-            17 => cfg.midi.cc.master_deck.to_string(),
-            18 => cfg.midi.cc.phrase_16.to_string(),
+            6 => cfg.midi.phrase_lock_stable_beats.to_string(),
+            7 => (cfg.midi.notes.channel + 1).to_string(),
+            8 => cfg.midi.notes.beat.to_string(),
+            9 => cfg.midi.notes.downbeat.to_string(),
+            10 => cfg.midi.notes.phrase_change.to_string(),
+            11 => (cfg.midi.cc.channel + 1).to_string(),
+            12 => cfg.midi.cc.bpm_coarse.to_string(),
+            13 => cfg.midi.cc.bpm_fine.to_string(),
+            14 => cfg.midi.cc.pitch.to_string(),
+            15 => cfg.midi.cc.bar_phase.to_string(),
+            16 => cfg.midi.cc.beat_phase.to_string(),
+            17 => cfg.midi.cc.playing.to_string(),
+            18 => cfg.midi.cc.master_deck.to_string(),
+            19 => cfg.midi.cc.phrase_16.to_string(),
             _ => return None,
         }),
         SettingKind::NumericI64 => Some(match idx {
@@ -622,11 +696,17 @@ pub fn apply_change(
                 (cfg.midi.latency_compensation_ms + step).clamp(-1000, 1000);
             true
         }
-        19 => {
-            cfg.midi.mtc.enabled = !cfg.midi.mtc.enabled;
+        6 => {
+            let step = if direction < 0 { -1 } else { 1 };
+            let next = (cfg.midi.phrase_lock_stable_beats as i16 + step).clamp(1, 32) as u8;
+            cfg.midi.phrase_lock_stable_beats = next;
             true
         }
         20 => {
+            cfg.midi.mtc.enabled = !cfg.midi.mtc.enabled;
+            true
+        }
+        21 => {
             cfg.midi.mtc.frame_rate = cfg.midi.mtc.frame_rate.next();
             true
         }
@@ -657,40 +737,46 @@ pub fn apply_numeric_input(cfg: &mut Config, idx: usize, value: &str) -> bool {
         6 => value
             .parse::<u8>()
             .ok()
-            .filter(|v| (1..=16).contains(v))
-            .map(|v| cfg.midi.notes.channel = v - 1)
+            .filter(|v| (1..=32).contains(v))
+            .map(|v| cfg.midi.phrase_lock_stable_beats = v)
             .is_some(),
         7 => value
             .parse::<u8>()
             .ok()
-            .filter(|v| *v <= 127)
-            .map(|v| cfg.midi.notes.beat = v)
+            .filter(|v| (1..=16).contains(v))
+            .map(|v| cfg.midi.notes.channel = v - 1)
             .is_some(),
         8 => value
             .parse::<u8>()
             .ok()
             .filter(|v| *v <= 127)
-            .map(|v| cfg.midi.notes.downbeat = v)
+            .map(|v| cfg.midi.notes.beat = v)
             .is_some(),
         9 => value
             .parse::<u8>()
             .ok()
             .filter(|v| *v <= 127)
-            .map(|v| cfg.midi.notes.phrase_change = v)
+            .map(|v| cfg.midi.notes.downbeat = v)
             .is_some(),
         10 => value
+            .parse::<u8>()
+            .ok()
+            .filter(|v| *v <= 127)
+            .map(|v| cfg.midi.notes.phrase_change = v)
+            .is_some(),
+        11 => value
             .parse::<u8>()
             .ok()
             .filter(|v| (1..=16).contains(v))
             .map(|v| cfg.midi.cc.channel = v - 1)
             .is_some(),
-        11 => value
+        12 => value
             .parse::<u8>()
             .ok()
             .filter(|v| *v <= 127)
             .map(|v| cfg.midi.cc.bpm_coarse = v)
             .is_some(),
-        12 => value
+        13 => value
             .parse::<u8>()
             .ok()
             .filter(|v| *v <= 127)
@@ -735,6 +821,7 @@ pub fn apply_numeric_input(cfg: &mut Config, idx: usize, value: &str) -> bool {
         _ => false,
     }
 }
+
 
 pub fn selected_interface_name_ip(cfg: &Config, interfaces: &[NetworkIfaceInfo]) -> String {
     selected_interface_index(cfg, interfaces)
