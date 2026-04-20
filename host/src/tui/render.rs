@@ -195,11 +195,43 @@ fn draw_header(
                 width: gauge_width,
                 height: 1,
             };
-            let gauge = Gauge::default()
-                .gauge_style(Style::default().fg(CLR_ACCENT))
-                .label(format!("16 {:.0}%", master.bar_phase * 100.0))
-                .ratio(master.bar_phase.clamp(0.0, 1.0));
-            f.render_widget(gauge, gauge_area);
+            let a = tui.midi_activity.lock();
+
+            let in16 = if master.phrase_16_beat > 0 {
+                master.phrase_16_beat
+            } else {
+                0
+            };
+            let in16 = if in16 == 0 { 0 } else { in16.min(16) };
+
+            let out16 = a.clock_phrase_beat.min(16);
+            let stable = cfg_r.midi.phrase_lock_stable_beats;
+            let waiting = a.clock_waiting_for_phrase;
+            let wait_seen = a.clock_wait_beats_seen;
+
+            let status = if waiting {
+                format!("wait {}/{}", wait_seen, stable)
+            } else if a.clock_running {
+                "lock".to_string()
+            } else {
+                "idle".to_string()
+            };
+
+            let label = format!(
+                "in {:02} b{}  out {:02}  {}",
+                in16,
+                master.beat_in_bar,
+                out16,
+                status
+            );
+
+            f.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    label,
+                    Style::default().fg(CLR_ACCENT),
+                ))),
+                gauge_area,
+            );
         }
     }
 }
@@ -741,7 +773,12 @@ fn draw_output_status_panel(
 
     // MTC status row.
     let mtc_status = if cfg_r.midi.mtc.enabled {
-        format!("✓ {} (running)", cfg_r.midi.mtc.frame_rate.label())
+        format!(
+            "✓ {} (qf: {}, full: {})",
+            cfg_r.midi.mtc.frame_rate.label(),
+            activity.mtc_quarter_frames,
+            activity.mtc_full_frames
+        )
     } else {
         "✗ disabled".to_string()
     };
@@ -831,8 +868,12 @@ fn draw_log_panel(f: &mut Frame, area: Rect, tui: &TuiState) {
                 Color::Red
             } else if s.contains("WARN") || s.contains("warn") {
                 Color::Yellow
+            } else if s.contains("TRACE") || s.contains("trace") {
+                CLR_DIM
             } else if s.contains("DEBUG") || s.contains("debug") {
                 CLR_DIM
+            } else if s.contains("INFO") || s.contains("info") {
+                Color::White
             } else {
                 Color::White
             };
