@@ -22,6 +22,7 @@ use crate::config;
 use crate::prolink::discovery::DeviceTable;
 use crate::prolink::{MAGIC, PKT_KEEPALIVE};
 use crate::state::{SharedState, TrackChange};
+use crate::{midi::soak::SoakMode, midi::soak::SoakArgs};
 
 // ── CLI ───────────────────────────────────────────────────────────────────────────
 
@@ -63,6 +64,26 @@ pub struct Cli {
     /// Disable the TUI and use plain log output.
     #[arg(long)]
     pub no_tui: bool,
+
+    /// Run a non-interactive MIDI output soak and write a JSON report.
+    #[arg(long, value_enum)]
+    pub soak: Option<SoakMode>,
+
+    /// Soak duration in seconds.
+    #[arg(long, default_value_t = 300, requires = "soak")]
+    pub duration_secs: u64,
+
+    /// MIDI output port name for soak mode (substring match).
+    #[arg(long, default_value = "auto", requires = "soak")]
+    pub midi_out: String,
+
+    /// Output path for the soak JSON report.
+    #[arg(long, requires = "soak")]
+    pub report: Option<PathBuf>,
+
+    /// MTC frame rate for soak mode (frames per second). Only used with --soak mtc.
+    #[arg(long, default_value_t = 25, requires = "soak")]
+    pub fps: u8,
 }
 
 // ── AppContext ───────────────────────────────────────────────────────────────
@@ -76,6 +97,7 @@ pub struct AppContext {
     pub dj_state: SharedState,
     pub cfg: config::SharedConfig,
     pub device_table: DeviceTable,
+    pub log_buf: crate::tui::state::LogBuffer,
     // broadcast senders
     pub device_tx: broadcast::Sender<crate::prolink::discovery::DeviceEvent>,
     pub beat_tx: broadcast::Sender<crate::prolink::beat_listener::BeatEvent>,
@@ -106,15 +128,17 @@ pub fn init() -> anyhow::Result<AppContext> {
             .with(env_filter)
             .with(
                 fmt::layer()
-                    .with_target(false)
+                    .with_target(true)
                     .with_ansi(false)
+                    .with_timer(fmt::time::Uptime::default())
                     .with_writer(crate::tui::state::MakeLogWriter::new(log_buf.clone())),
             )
             .init();
     } else {
         tracing_subscriber::fmt()
             .with_env_filter(env_filter)
-            .with_target(false)
+            .with_target(true)
+            .with_timer(tracing_subscriber::fmt::time::Uptime::default())
             .init();
     }
 
@@ -126,6 +150,44 @@ pub fn init() -> anyhow::Result<AppContext> {
     if cli.list_interfaces {
         list_interfaces()?;
         std::process::exit(0);
+    }
+
+    // ── Soak mode shortcut (non-interactive) ─────────────────────────────────
+    if let Some(mode) = cli.soak {
+        let report_path = cli
+            .report
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("--report is required when using --soak"))?;
+
+        let args = SoakArgs {
+            mode,
+            duration_secs: cli.duration_secs,
+            midi_out: cli.midi_out.clone(),
+            report_path,
+            fps: cli.fps,
+        };
+
+        tracing::info!(
+            ?mode,
+            duration_secs = args.duration_secs,
+            midi_out = %args.midi_out,
+            report = %args.report_path.display(),
+            fps = args.fps,
+            "Running MIDI soak"
+        );
+
+        let res = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(crate::midi::soak::run(args))
+        });
+
+        match res {
+            Ok(code) => std::process::exit(code),
+            Err(err) => {
+                tracing::error!(error = %err, "Soak failed");
+                eprintln!("soak failed: {err:?}");
+                std::process::exit(2);
+            }
+        }
     }
 
     // ── Config ───────────────────────────────────────────────────────────────
@@ -170,7 +232,7 @@ pub fn init() -> anyhow::Result<AppContext> {
 
     // ── MIDI output ──────────────────────────────────────────────────────────
     let midi_conn: Arc<Mutex<Option<MidiOutputConnection>>> =
-        match open_midi_output(&startup_cfg.midi.output) {
+        match crate::midi::open_midi_output(&startup_cfg.midi.output) {
             Ok(conn) => Arc::new(Mutex::new(Some(conn))),
             Err(e) => {
                 tracing::warn!("Could not open MIDI output: {e}");
@@ -203,6 +265,7 @@ pub fn init() -> anyhow::Result<AppContext> {
         dj_state,
         cfg,
         device_table,
+        log_buf,
         device_tx,
         beat_tx,
         status_tx,
@@ -479,36 +542,6 @@ pub fn interface_priority(name: &str, ip: &Ipv4Addr) -> u8 {
     base
 }
 
-// ── MIDI helpers ───────────────────────────────────────────────────────────────
-
-fn open_midi_output(port_name: &str) -> anyhow::Result<MidiOutputConnection> {
-    let midi_out = MidiOutput::new("xdj-clock")?;
-    let ports = midi_out.ports();
-    if ports.is_empty() {
-        anyhow::bail!("No MIDI output ports available");
-    }
-
-    if port_name == "auto" {
-        let port = &ports[0];
-        let name = midi_out.port_name(port)?;
-        tracing::info!(%name, "Auto-selected MIDI output port");
-        return midi_out
-            .connect(port, "xdj-clock")
-            .map_err(|e| anyhow::anyhow!("{}", e));
-    }
-
-    for port in &ports {
-        let name = midi_out.port_name(port)?;
-        if name.to_lowercase().contains(&port_name.to_lowercase()) {
-            tracing::info!(%name, "Selected MIDI output port");
-            return midi_out
-                .connect(port, "xdj-clock")
-                .map_err(|e| anyhow::anyhow!("{}", e));
-        }
-    }
-    anyhow::bail!("MIDI port matching {:?} not found", port_name)
-}
-
 pub fn list_midi_ports() -> anyhow::Result<()> {
     let midi_out = MidiOutput::new("xdj-clock")?;
     let ports = midi_out.ports();
@@ -579,7 +612,7 @@ pub fn list_interfaces() -> anyhow::Result<()> {
 
 pub async fn headless_loop(
     state: SharedState,
-    midi_conn: Arc<Mutex<Option<MidiOutputConnection>>>,
+    midi_out: crate::midi::MidiOutHandle,
 ) -> anyhow::Result<()> {
     tracing::info!("All tasks running (headless mode). Ctrl+C to quit.");
     let mut ticker = tokio::time::interval(Duration::from_secs(5));
@@ -603,9 +636,7 @@ pub async fn headless_loop(
             }
             _ = tokio::signal::ctrl_c() => {
                 tracing::info!("Shutting down…");
-                if let Some(ref mut c) = *midi_conn.lock() {
-                    let _ = c.send(&[0xFC]);
-                }
+                midi_out.stop().await;
                 tracing::info!("MIDI Stop sent, exiting.");
                 return Ok(());
             }

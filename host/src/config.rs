@@ -69,6 +69,7 @@ pub struct MidiConfig {
     pub clock_enabled: bool,
     pub smoothing_ms: u64,
     pub latency_compensation_ms: i64,
+    pub phrase_lock_stable_beats: u8,
     pub notes: NoteConfig,
     pub cc: CcConfig,
     pub mtc: MtcConfig,
@@ -81,6 +82,7 @@ impl Default for MidiConfig {
             clock_enabled: true,
             smoothing_ms: 30,
             latency_compensation_ms: 0,
+            phrase_lock_stable_beats: 4,
             notes: NoteConfig::default(),
             cc: CcConfig::default(),
             mtc: MtcConfig::default(),
@@ -283,6 +285,11 @@ fn validate(cfg: &Config) -> anyhow::Result<()> {
         cfg.midi.latency_compensation_ms >= -1000 && cfg.midi.latency_compensation_ms <= 1000,
         "midi.latency_compensation_ms must be -1000 to 1000, got {}",
         cfg.midi.latency_compensation_ms
+    );
+    anyhow::ensure!(
+        (1..=32).contains(&cfg.midi.phrase_lock_stable_beats),
+        "midi.phrase_lock_stable_beats must be 1 to 32, got {}",
+        cfg.midi.phrase_lock_stable_beats
     );
     anyhow::ensure!(
         cfg.link.quantum >= 1.0 && cfg.link.quantum <= 16.0,
