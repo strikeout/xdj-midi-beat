@@ -270,6 +270,11 @@ pub const SETTINGS: &[SettingDef] = &[
         section: Some("MIDI Clock"),
     },
     SettingDef {
+        label: "Clock Loop Sync",
+        kind: SettingKind::Toggle,
+        section: Some("MIDI Clock"),
+    },
+    SettingDef {
         label: "BPM Smoothing",
         kind: SettingKind::NumericU64,
         section: None,
@@ -359,11 +364,6 @@ pub const SETTINGS: &[SettingDef] = &[
         label: "MTC Frame Rate",
         kind: SettingKind::CycleSource, // reuse cycle kind for frame rate cycling
         section: None,
-    },
-    SettingDef {
-        label: "Clock Loop Sync",
-        kind: SettingKind::Toggle,
-        section: Some("MIDI Clock"),
     },
 ];
 
@@ -597,37 +597,37 @@ pub fn get_value(cfg: &Config, interfaces: &[NetworkIfaceInfo], idx: usize) -> S
                 "✗".to_string()
             }
         }
-        4 => format!("{} ms", cfg.midi.smoothing_ms),
-        5 => format!("{} ms", cfg.midi.latency_compensation_ms),
-        6 => format!("{} beats", cfg.midi.phrase_lock_stable_beats),
-        7 => (cfg.midi.notes.channel + 1).to_string(),
-        8 => cfg.midi.notes.beat.to_string(),
-        9 => cfg.midi.notes.downbeat.to_string(),
-        10 => cfg.midi.notes.phrase_change.to_string(),
-        11 => (cfg.midi.cc.channel + 1).to_string(),
-        12 => cfg.midi.cc.bpm_coarse.to_string(),
-        13 => cfg.midi.cc.bpm_fine.to_string(),
-        14 => cfg.midi.cc.pitch.to_string(),
-        15 => cfg.midi.cc.bar_phase.to_string(),
-        16 => cfg.midi.cc.beat_phase.to_string(),
-        17 => cfg.midi.cc.playing.to_string(),
-        18 => cfg.midi.cc.master_deck.to_string(),
-        19 => cfg.midi.cc.phrase_16.to_string(),
-        20 => {
-            if cfg.midi.mtc.enabled {
-                "✓".to_string()
-            } else {
-                "✗".to_string()
-            }
-        }
-        21 => cfg.midi.mtc.frame_rate.label().to_string(),
-        22 => {
+        4 => {
             if cfg.midi.clock_loop_enabled {
                 "✓".to_string()
             } else {
                 "✗".to_string()
             }
         }
+        5 => format!("{} ms", cfg.midi.smoothing_ms),
+        6 => format!("{} ms", cfg.midi.latency_compensation_ms),
+        7 => format!("{} beats", cfg.midi.phrase_lock_stable_beats),
+        8 => (cfg.midi.notes.channel + 1).to_string(),
+        9 => cfg.midi.notes.beat.to_string(),
+        10 => cfg.midi.notes.downbeat.to_string(),
+        11 => cfg.midi.notes.phrase_change.to_string(),
+        12 => (cfg.midi.cc.channel + 1).to_string(),
+        13 => cfg.midi.cc.bpm_coarse.to_string(),
+        14 => cfg.midi.cc.bpm_fine.to_string(),
+        15 => cfg.midi.cc.pitch.to_string(),
+        16 => cfg.midi.cc.bar_phase.to_string(),
+        17 => cfg.midi.cc.beat_phase.to_string(),
+        18 => cfg.midi.cc.playing.to_string(),
+        19 => cfg.midi.cc.master_deck.to_string(),
+        20 => cfg.midi.cc.phrase_16.to_string(),
+        21 => {
+            if cfg.midi.mtc.enabled {
+                "✓".to_string()
+            } else {
+                "✗".to_string()
+            }
+        }
+        22 => cfg.midi.mtc.frame_rate.label().to_string(),
         _ => String::new(),
     }
 }
@@ -636,25 +636,25 @@ pub fn numeric_edit_value(cfg: &Config, idx: usize) -> Option<String> {
     match setting_kind(idx) {
         SettingKind::NumericU8 | SettingKind::NumericU64 => Some(match idx {
             2 => cfg.device_number.to_string(),
-            4 => cfg.midi.smoothing_ms.to_string(),
-            6 => cfg.midi.phrase_lock_stable_beats.to_string(),
-            7 => (cfg.midi.notes.channel + 1).to_string(),
-            8 => cfg.midi.notes.beat.to_string(),
-            9 => cfg.midi.notes.downbeat.to_string(),
-            10 => cfg.midi.notes.phrase_change.to_string(),
-            11 => (cfg.midi.cc.channel + 1).to_string(),
-            12 => cfg.midi.cc.bpm_coarse.to_string(),
-            13 => cfg.midi.cc.bpm_fine.to_string(),
-            14 => cfg.midi.cc.pitch.to_string(),
-            15 => cfg.midi.cc.bar_phase.to_string(),
-            16 => cfg.midi.cc.beat_phase.to_string(),
-            17 => cfg.midi.cc.playing.to_string(),
-            18 => cfg.midi.cc.master_deck.to_string(),
-            19 => cfg.midi.cc.phrase_16.to_string(),
+            5 => cfg.midi.smoothing_ms.to_string(),
+            7 => cfg.midi.phrase_lock_stable_beats.to_string(),
+            8 => (cfg.midi.notes.channel + 1).to_string(),
+            9 => cfg.midi.notes.beat.to_string(),
+            10 => cfg.midi.notes.downbeat.to_string(),
+            11 => cfg.midi.notes.phrase_change.to_string(),
+            12 => (cfg.midi.cc.channel + 1).to_string(),
+            13 => cfg.midi.cc.bpm_coarse.to_string(),
+            14 => cfg.midi.cc.bpm_fine.to_string(),
+            15 => cfg.midi.cc.pitch.to_string(),
+            16 => cfg.midi.cc.bar_phase.to_string(),
+            17 => cfg.midi.cc.beat_phase.to_string(),
+            18 => cfg.midi.cc.playing.to_string(),
+            19 => cfg.midi.cc.master_deck.to_string(),
+            20 => cfg.midi.cc.phrase_16.to_string(),
             _ => return None,
         }),
         SettingKind::NumericI64 => Some(match idx {
-            5 => cfg.midi.latency_compensation_ms.to_string(),
+            6 => cfg.midi.latency_compensation_ms.to_string(),
             _ => return None,
         }),
         _ => None,
@@ -706,28 +706,28 @@ pub fn apply_change(
             cfg.midi.clock_enabled = !cfg.midi.clock_enabled;
             true
         }
-        5 => {
+        4 => {
+            cfg.midi.clock_loop_enabled = !cfg.midi.clock_loop_enabled;
+            true
+        }
+        6 => {
             let step = if direction < 0 { -5 } else { 5 };
             cfg.midi.latency_compensation_ms =
                 (cfg.midi.latency_compensation_ms + step).clamp(-1000, 1000);
             true
         }
-        6 => {
+        7 => {
             let step = if direction < 0 { -1 } else { 1 };
             let next = (cfg.midi.phrase_lock_stable_beats as i16 + step).clamp(1, 32) as u8;
             cfg.midi.phrase_lock_stable_beats = next;
             true
         }
-        20 => {
+        21 => {
             cfg.midi.mtc.enabled = !cfg.midi.mtc.enabled;
             true
         }
-        21 => {
-            cfg.midi.mtc.frame_rate = cfg.midi.mtc.frame_rate.next();
-            true
-        }
         22 => {
-            cfg.midi.clock_loop_enabled = !cfg.midi.clock_loop_enabled;
+            cfg.midi.mtc.frame_rate = cfg.midi.mtc.frame_rate.next();
             true
         }
         _ => false,
@@ -742,97 +742,97 @@ pub fn apply_numeric_input(cfg: &mut Config, idx: usize, value: &str) -> bool {
             .filter(|v| (1..=15).contains(v))
             .map(|v| cfg.device_number = v)
             .is_some(),
-        4 => value
+        5 => value
             .parse::<u64>()
             .ok()
             .filter(|v| *v <= 1000)
             .map(|v| cfg.midi.smoothing_ms = v)
             .is_some(),
-        5 => value
+        6 => value
             .parse::<i64>()
             .ok()
             .filter(|v| (-1000..=1000).contains(v))
             .map(|v| cfg.midi.latency_compensation_ms = v)
             .is_some(),
-        6 => value
+        7 => value
             .parse::<u8>()
             .ok()
             .filter(|v| (1..=32).contains(v))
             .map(|v| cfg.midi.phrase_lock_stable_beats = v)
             .is_some(),
-        7 => value
+        8 => value
             .parse::<u8>()
             .ok()
             .filter(|v| (1..=16).contains(v))
             .map(|v| cfg.midi.notes.channel = v - 1)
             .is_some(),
-        8 => value
+        9 => value
             .parse::<u8>()
             .ok()
             .filter(|v| *v <= 127)
             .map(|v| cfg.midi.notes.beat = v)
             .is_some(),
-        9 => value
+        10 => value
             .parse::<u8>()
             .ok()
             .filter(|v| *v <= 127)
             .map(|v| cfg.midi.notes.downbeat = v)
             .is_some(),
-        10 => value
+        11 => value
             .parse::<u8>()
             .ok()
             .filter(|v| *v <= 127)
             .map(|v| cfg.midi.notes.phrase_change = v)
             .is_some(),
-        11 => value
+        12 => value
             .parse::<u8>()
             .ok()
             .filter(|v| (1..=16).contains(v))
             .map(|v| cfg.midi.cc.channel = v - 1)
             .is_some(),
-        12 => value
+        13 => value
             .parse::<u8>()
             .ok()
             .filter(|v| *v <= 127)
             .map(|v| cfg.midi.cc.bpm_coarse = v)
             .is_some(),
-        13 => value
+        14 => value
             .parse::<u8>()
             .ok()
             .filter(|v| *v <= 127)
             .map(|v| cfg.midi.cc.bpm_fine = v)
             .is_some(),
-        14 => value
+        15 => value
             .parse::<u8>()
             .ok()
             .filter(|v| *v <= 127)
             .map(|v| cfg.midi.cc.pitch = v)
             .is_some(),
-        15 => value
+        16 => value
             .parse::<u8>()
             .ok()
             .filter(|v| *v <= 127)
             .map(|v| cfg.midi.cc.bar_phase = v)
             .is_some(),
-        16 => value
+        17 => value
             .parse::<u8>()
             .ok()
             .filter(|v| *v <= 127)
             .map(|v| cfg.midi.cc.beat_phase = v)
             .is_some(),
-        17 => value
+        18 => value
             .parse::<u8>()
             .ok()
             .filter(|v| *v <= 127)
             .map(|v| cfg.midi.cc.playing = v)
             .is_some(),
-        18 => value
+        19 => value
             .parse::<u8>()
             .ok()
             .filter(|v| *v <= 127)
             .map(|v| cfg.midi.cc.master_deck = v)
             .is_some(),
-        19 => value
+        20 => value
             .parse::<u8>()
             .ok()
             .filter(|v| *v <= 127)
