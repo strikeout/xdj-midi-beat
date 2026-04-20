@@ -210,7 +210,7 @@ fn draw_header(
             let waiting = a.clock_waiting_for_phrase;
             let wait_seen = a.clock_wait_beats_seen;
             let diff = if let Some(delta_ms) = a.clock_timing_delta_ms {
-                format!("{:+.1}ms", delta_ms)
+                format!("{:.1}ms", delta_ms.abs())
             } else {
                 "—".to_string()
             };

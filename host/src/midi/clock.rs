@@ -496,6 +496,7 @@ fn handle_prolink_beat_loop_disabled(
     state: &SharedState,
     midi: &Arc<dyn MidiTransport>,
     activity: &Arc<Mutex<MidiActivity>>,
+    resync_every_beats: u8,
     evt: BeatEvent,
 ) {
     let BeatEvent::Beat { packet: bp, received_at } = evt else {
@@ -516,13 +517,27 @@ fn handle_prolink_beat_loop_disabled(
 
     cs.set_bpm(bp.effective_bpm);
     cs.waiting_for_downbeat = false;
+    let resync_every = resync_every_beats.max(1);
 
     if cs.running {
-        apply_phase_correction(cs, received_at);
+        cs.beat_count = cs.beat_count.wrapping_add(1).max(1);
+        if cs.beat_count % resync_every == 0 {
+            apply_phase_correction(cs, received_at);
+        }
+
+        if let Some(mut a) = activity.try_lock() {
+            a.clock_running = true;
+            a.clock_waiting_for_phrase = false;
+            a.clock_wait_beats_seen = 0;
+            a.clock_phrase_beat = ((cs.beat_count.saturating_sub(1)) % 16) + 1;
+            a.clock_pulse_index = cs.pulse_index;
+            a.clock_timing_delta_ms = beat_timing_delta_ms(cs, received_at);
+        }
     } else {
         cs.running = true;
         cs.pulse_index = 0;
         cs.last_pulse = received_at;
+        cs.beat_count = 1;
         let msg = if cs.has_started { MSG_CONTINUE } else { MSG_START };
         cs.has_started = true;
         let _ = midi.send_message(&[msg]);
@@ -677,7 +692,15 @@ pub async fn run(
                 match evt {
                     Ok(evt) => {
                         if clock_enabled && !clock_loop_enabled {
-                            handle_prolink_beat_loop_disabled(&mut cs, &state, &midi, &activity, evt);
+                            let stable_beats = cfg.read().midi.phrase_lock_stable_beats;
+                            handle_prolink_beat_loop_disabled(
+                                &mut cs,
+                                &state,
+                                &midi,
+                                &activity,
+                                stable_beats,
+                                evt,
+                            );
                         }
                     }
                     Err(broadcast::error::RecvError::Closed) => return,
