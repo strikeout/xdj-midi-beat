@@ -208,6 +208,7 @@ fn cycle_setting(
             3 => tracing::info!(enabled = guard.midi.clock_enabled, "MIDI clock setting changed"),
             20 => tracing::info!(enabled = guard.midi.mtc.enabled, "MTC setting changed"),
             21 => tracing::info!(frame_rate = guard.midi.mtc.frame_rate.label(), "MTC frame rate changed"),
+            22 => tracing::info!(enabled = guard.midi.clock_loop_enabled, "MIDI clock loop setting changed"),
             _ => {}
         }
     }
@@ -249,6 +250,7 @@ fn log_setting_change(idx: usize, cfg: &crate::config::Config) {
         19 => tracing::info!(cc = cfg.midi.cc.phrase_16, "Phrase 16 CC changed"),
         20 => tracing::info!(enabled = cfg.midi.mtc.enabled, "MTC setting changed"),
         21 => tracing::info!(frame_rate = cfg.midi.mtc.frame_rate.label(), "MTC frame rate changed"),
+        22 => tracing::info!(enabled = cfg.midi.clock_loop_enabled, "MIDI clock loop setting changed"),
         _ => {}
     }
 }

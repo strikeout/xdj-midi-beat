@@ -67,6 +67,7 @@ impl Default for Config {
 pub struct MidiConfig {
     pub output: String,
     pub clock_enabled: bool,
+    pub clock_loop_enabled: bool,
     pub smoothing_ms: u64,
     pub latency_compensation_ms: i64,
     pub phrase_lock_stable_beats: u8,
@@ -80,6 +81,7 @@ impl Default for MidiConfig {
         Self {
             output: "auto".into(),
             clock_enabled: true,
+            clock_loop_enabled: true,
             smoothing_ms: 30,
             latency_compensation_ms: 0,
             phrase_lock_stable_beats: 4,

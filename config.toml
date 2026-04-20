@@ -48,6 +48,10 @@ output = "auto"
 # Enable 24-PPQ MIDI clock output (Start / Stop / Continue + 0xF8 pulses).
 clock_enabled = true
 
+# Enable phrase-lock + timing snapshot sync loop for MIDI clock.
+# false = free-run from current BPM without waiting for phrase re-lock.
+clock_loop_enabled = true
+
 # BPM smoothing window in milliseconds.  Larger = less jitter but slower
 # response to pitch-fader changes.  0 = no smoothing.
 smoothing_ms = 0

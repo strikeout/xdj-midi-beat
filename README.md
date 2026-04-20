@@ -83,6 +83,7 @@ interface = "auto"    # Network adapter selection
 [midi]
 output = "auto"       # MIDI port substring match
 clock_enabled = true
+clock_loop_enabled = true
 smoothing_ms = 30     # BPM jitter reduction
 ```
 

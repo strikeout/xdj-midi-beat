@@ -195,10 +195,7 @@ fn handle_timing_snapshot(
     };
 
     let beat_in_bar = measurement.beat_in_bar.unwrap_or(master.beat_in_bar);
-    let is_beat_edge = matches!(
-        measurement.kind,
-        MeasurementKind::ProLinkBeatPacket | MeasurementKind::AbletonLink
-    );
+    let is_beat_edge = matches!(measurement.kind, MeasurementKind::ProLinkBeatPacket);
 
     if cs.waiting_for_downbeat {
         if is_beat_edge && beat_in_bar == 1
@@ -469,6 +466,31 @@ fn handle_master_change(
     }
 }
 
+fn handle_master_change_without_phrase_wait(
+    cs: &mut ClockState,
+    midi: &Arc<dyn MidiTransport>,
+    activity: &Arc<Mutex<MidiActivity>>,
+) {
+    if cs.running {
+        let _ = midi.send_message(&[MSG_STOP]);
+    }
+
+    cs.running = false;
+    cs.beat_count = 0;
+    cs.waiting_for_downbeat = false;
+    cs.wait_beats_seen = 0;
+    cs.last_timing_received_at = None;
+    cs.last_pulse = Instant::now();
+
+    if let Some(mut a) = activity.try_lock() {
+        a.clock_running = false;
+        a.clock_waiting_for_phrase = false;
+        a.clock_wait_beats_seen = 0;
+        a.clock_phrase_beat = 0;
+        a.clock_pulse_index = 0;
+    }
+}
+
 // ── Main clock task ───────────────────────────────────────────────────────────
 
 pub async fn run(
@@ -482,6 +504,7 @@ pub async fn run(
 ) {
     let mut cs = ClockState::new();
     let mut clock_enabled = cfg.read().midi.clock_enabled;
+    let mut clock_loop_enabled = cfg.read().midi.clock_loop_enabled;
     let mut cached_bpm = 0.0;
     let mut cached_is_playing = false;
     let mut last_master_key = {
@@ -497,6 +520,9 @@ pub async fn run(
     tracing::info!("MIDI clock task started");
     if !clock_enabled {
         tracing::info!("MIDI clock disabled in config");
+    } else if !clock_loop_enabled {
+        tracing::info!("MIDI clock loop disabled in config");
+        cs.waiting_for_downbeat = false;
     } else {
         cs.arm_wait_for_phrase_start();
     }
@@ -518,6 +544,22 @@ pub async fn run(
             }
         }
 
+        let current_loop_enabled = cfg.read().midi.clock_loop_enabled;
+        if current_loop_enabled != clock_loop_enabled {
+            clock_loop_enabled = current_loop_enabled;
+            if !clock_loop_enabled {
+                tracing::info!("MIDI clock loop disabled at runtime");
+                cs.waiting_for_downbeat = false;
+                cs.wait_beats_seen = 0;
+                cs.last_timing_received_at = None;
+            } else {
+                tracing::info!("MIDI clock loop enabled at runtime");
+                if clock_enabled {
+                    cs.arm_wait_for_phrase_start();
+                }
+            }
+        }
+
         let current_master_key = {
             let st = state.read();
             (st.master.source.clone(), st.master.device_number)
@@ -531,7 +573,11 @@ pub async fn run(
                 new_device = current_master_key.1,
                 "MIDI clock re-arming on master change"
             );
-            handle_master_change(&mut cs, &midi, &activity);
+            if clock_loop_enabled {
+                handle_master_change(&mut cs, &midi, &activity);
+            } else {
+                handle_master_change_without_phrase_wait(&mut cs, &midi, &activity);
+            }
             last_master_key = current_master_key;
         } else {
             last_master_key = current_master_key;
@@ -571,7 +617,7 @@ pub async fn run(
                 }
             }
             changed = timing_rx.changed() => {
-                if changed.is_ok() {
+                if changed.is_ok() && clock_loop_enabled {
                     let stable_beats = cfg.read().midi.phrase_lock_stable_beats;
                     handle_timing_snapshot(&mut cs, &state, &midi, &activity, stable_beats, Instant::now());
                 }

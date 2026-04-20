@@ -360,6 +360,11 @@ pub const SETTINGS: &[SettingDef] = &[
         kind: SettingKind::CycleSource, // reuse cycle kind for frame rate cycling
         section: None,
     },
+    SettingDef {
+        label: "Clock Loop Sync",
+        kind: SettingKind::Toggle,
+        section: Some("MIDI Clock"),
+    },
 ];
 
 // ── TUI state ────────────────────────────────────────────────────────────────
@@ -616,6 +621,13 @@ pub fn get_value(cfg: &Config, interfaces: &[NetworkIfaceInfo], idx: usize) -> S
             }
         }
         21 => cfg.midi.mtc.frame_rate.label().to_string(),
+        22 => {
+            if cfg.midi.clock_loop_enabled {
+                "✓".to_string()
+            } else {
+                "✗".to_string()
+            }
+        }
         _ => String::new(),
     }
 }
@@ -712,6 +724,10 @@ pub fn apply_change(
         }
         21 => {
             cfg.midi.mtc.frame_rate = cfg.midi.mtc.frame_rate.next();
+            true
+        }
+        22 => {
+            cfg.midi.clock_loop_enabled = !cfg.midi.clock_loop_enabled;
             true
         }
         _ => false,
