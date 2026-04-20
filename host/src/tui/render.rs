@@ -209,6 +209,11 @@ fn draw_header(
             let stable = cfg_r.midi.phrase_lock_stable_beats;
             let waiting = a.clock_waiting_for_phrase;
             let wait_seen = a.clock_wait_beats_seen;
+            let diff = if let Some(delta_ms) = a.clock_timing_delta_ms {
+                format!("{:+.1}ms", delta_ms)
+            } else {
+                "—".to_string()
+            };
 
             let status = if waiting {
                 format!("wait {}/{}", wait_seen, stable)
@@ -219,10 +224,11 @@ fn draw_header(
             };
 
             let label = format!(
-                "in {:02} b{}  out {:02}  {}",
+                "in {:02} b{}  out {:02}  Δ{}  {}",
                 in16,
                 master.beat_in_bar,
                 out16,
+                diff,
                 status
             );
 

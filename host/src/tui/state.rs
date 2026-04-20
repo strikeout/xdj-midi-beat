@@ -182,6 +182,9 @@ pub struct MidiActivity {
     pub clock_pulse_index: u64,
     pub clock_last_start_at: Option<Instant>,
     pub clock_last_pulse_at: Option<Instant>,
+
+    /// Latest beat timing delta in milliseconds.
+    pub clock_timing_delta_ms: Option<f64>,
 }
 
 impl Default for MidiActivity {
@@ -202,6 +205,7 @@ impl Default for MidiActivity {
             clock_pulse_index: 0,
             clock_last_start_at: None,
             clock_last_pulse_at: None,
+            clock_timing_delta_ms: None,
         }
     }
 }

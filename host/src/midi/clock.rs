@@ -90,6 +90,31 @@ fn bpm_to_interval_ns(bpm: f64) -> u64 {
     ns.round() as u64
 }
 
+fn signed_delta_ms(a: Instant, b: Instant) -> f64 {
+    if a >= b {
+        a.duration_since(b).as_secs_f64() * 1000.0
+    } else {
+        -(b.duration_since(a).as_secs_f64() * 1000.0)
+    }
+}
+
+fn beat_timing_delta_ms(cs: &ClockState, beat_at: Instant) -> Option<f64> {
+    if !cs.running || cs.interval_ns == 0 {
+        return None;
+    }
+
+    let next_boundary = cs.last_pulse + Duration::from_nanos(cs.interval_ns);
+    let prev_boundary = cs.last_pulse;
+    let prev_delta = signed_delta_ms(prev_boundary, beat_at);
+    let next_delta = signed_delta_ms(next_boundary, beat_at);
+
+    if prev_delta.abs() <= next_delta.abs() {
+        Some(prev_delta)
+    } else {
+        Some(next_delta)
+    }
+}
+
 // ── Phase correction ──────────────────────────────────────────────────────────
 
 /// Maximum correction we will apply in one shot (1/4 of a pulse interval).
@@ -166,6 +191,7 @@ fn handle_beat_event(
                     a.clock_wait_beats_seen = cs.wait_beats_seen;
                     a.clock_phrase_beat = cs.beat_count;
                     a.clock_pulse_index = cs.pulse_index;
+                    a.clock_timing_delta_ms = beat_timing_delta_ms(&cs, Instant::now());
                 }
 
                 let phrase_beat = if master.phrase_16_beat > 0 {
@@ -193,6 +219,7 @@ fn handle_beat_event(
                             a.clock_wait_beats_seen = 0;
                             a.clock_phrase_beat = cs.beat_count;
                             a.clock_pulse_index = cs.pulse_index;
+                            a.clock_timing_delta_ms = beat_timing_delta_ms(&cs, Instant::now());
                         }
                         cs.pulse_index = 0;
                         cs.last_pulse = Instant::now();
@@ -234,6 +261,7 @@ fn handle_beat_event(
                 a.clock_wait_beats_seen = cs.wait_beats_seen;
                 a.clock_phrase_beat = cs.beat_count;
                 a.clock_pulse_index = cs.pulse_index;
+                a.clock_timing_delta_ms = beat_timing_delta_ms(&cs, Instant::now());
             }
 
             let master = state.read().master.clone();
@@ -262,6 +290,7 @@ fn handle_beat_event(
                             a.clock_wait_beats_seen = 0;
                             a.clock_phrase_beat = cs.beat_count;
                             a.clock_pulse_index = cs.pulse_index;
+                            a.clock_timing_delta_ms = beat_timing_delta_ms(&cs, Instant::now());
                         }
                     cs.pulse_index = 0;
                     cs.last_pulse = Instant::now();
