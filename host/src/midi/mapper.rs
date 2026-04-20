@@ -1,12 +1,11 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use midir::MidiOutputConnection;
 use parking_lot::Mutex;
 use tokio::sync::broadcast;
 
 use crate::config::{CcConfig, NoteConfig, SharedConfig};
-use crate::midi::{MidirTransport, MidiTransport};
+use crate::midi::MidiTransport;
 use crate::prolink::beat_listener::BeatEvent;
 use crate::prolink::status_listener::StatusEvent;
 use crate::state::SharedState;
@@ -156,6 +155,7 @@ mod tests {
             beat_in_bar: 2,
             bar_phase: 0.25,
             beat_phase: 0.5,
+            received_at: Instant::now(),
         });
         tokio::time::sleep(Duration::from_millis(30)).await;
         assert!(midi.get_messages().contains(&note_on(9, 36, 80).to_vec()));
@@ -171,6 +171,7 @@ mod tests {
             beat_in_bar: 2,
             bar_phase: 0.25,
             beat_phase: 0.5,
+            received_at: Instant::now(),
         });
         tokio::time::sleep(Duration::from_millis(30)).await;
         assert!(midi.get_messages().contains(&note_on(1, 40, 80).to_vec()));
@@ -301,7 +302,7 @@ async fn run_with_midi(
         tokio::select! {
             evt = beat_rx.recv() => {
                 match evt {
-                    Ok(BeatEvent::Beat(bp)) => {
+                    Ok(BeatEvent::Beat { packet: bp, .. }) => {
                         // Only trigger notes / CCs for the master deck.
                         let master_num = state.read().master.device_number;
                         if bp.device_number != master_num && master_num != 0 {
@@ -317,7 +318,7 @@ async fn run_with_midi(
                             "Beat"
                         );
                     }
-                    Ok(BeatEvent::AbsPosition(_)) => {
+                    Ok(BeatEvent::AbsPosition { .. }) => {
                         // Phase updates handled via shared state CCs below.
                     }
                     Ok(BeatEvent::LinkBeat { bpm, beat_in_bar, .. }) => {
@@ -411,13 +412,12 @@ async fn run_with_midi(
 }
 
 pub async fn run(
-    conn: Arc<Mutex<Option<MidiOutputConnection>>>,
+    midi: Arc<dyn MidiTransport>,
     state: SharedState,
     beat_rx: broadcast::Receiver<BeatEvent>,
     status_rx: broadcast::Receiver<StatusEvent>,
     cfg: SharedConfig,
     activity: Arc<Mutex<MidiActivity>>,
 ) {
-    let midi: Arc<dyn MidiTransport> = Arc::new(MidirTransport::new(Arc::clone(&conn)));
     run_with_midi(midi, state, beat_rx, status_rx, cfg, activity).await;
 }

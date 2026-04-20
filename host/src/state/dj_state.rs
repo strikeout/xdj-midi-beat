@@ -10,18 +10,25 @@ use crate::prolink::packets::{AbsPositionPacket, BeatPacket, CdjStatus, MixerSta
 use super::beat_source::BeatSource;
 use super::device::{DeviceState, MasterState};
 use super::song_structure::SongStructure;
+use super::timing::{LogThrottle, TimingMeasurement, TimingModel};
 use super::track_change::TrackChange;
 
 #[derive(Debug)]
 pub struct DjState {
     pub devices: HashMap<u8, DeviceState>,
     pub master: MasterState,
+    pub timing: TimingModel,
     pub bpm_smooth_window: usize,
     master_device_num: u8,
     pub prolink_seen: bool,
     pub link_peer_count: usize,
     source_mode: Source,
     last_link_master: Option<MasterState>,
+
+    // Bounded observability: avoid per-packet TRACE spam.
+    abspos_ingest_trace: LogThrottle,
+    link_ingest_trace: LogThrottle,
+    last_link_logged_beat_in_bar: Option<u8>,
 }
 
 impl DjState {
@@ -30,12 +37,17 @@ impl DjState {
         Self {
             devices: HashMap::new(),
             master: MasterState::default(),
+            timing: TimingModel::default(),
             bpm_smooth_window: window,
             master_device_num: 0,
             prolink_seen: false,
             link_peer_count: 0,
             source_mode: Source::Auto,
             last_link_master: None,
+
+            abspos_ingest_trace: LogThrottle::default(),
+            link_ingest_trace: LogThrottle::default(),
+            last_link_logged_beat_in_bar: None,
         }
     }
 
@@ -242,7 +254,7 @@ impl DjState {
         self.refresh_master();
     }
 
-    pub fn apply_beat(&mut self, bp: &BeatPacket) -> bool {
+    pub fn apply_beat(&mut self, bp: &BeatPacket, received_at: Instant) -> bool {
         let window = self.bpm_smooth_window;
         let dev = self.device_mut(bp.device_number);
 
@@ -254,7 +266,7 @@ impl DjState {
         }
 
         dev.beat_in_bar = bp.beat_in_bar;
-        dev.last_beat_at = Some(Instant::now());
+        dev.last_beat_at = Some(received_at);
         if bp.effective_bpm > 0.0 {
             dev.effective_bpm = dev.smooth_bpm(bp.effective_bpm, window);
             let beat_dur_ms = 60_000.0 / bp.effective_bpm;
@@ -263,12 +275,37 @@ impl DjState {
             dev.bar_phase = ((dev.phrase_16_beat as f64 + dev.beat_phase) / 16.0).clamp(0.0, 1.0);
         }
         dev.pitch_pct = bp.pitch_pct;
-        let is_master = self.master.device_number == bp.device_number;
+
+        let prev_master = self.master.device_number;
+
+        let m = TimingMeasurement::from_prolink_beat(bp, received_at);
+        self.timing.observe(m.clone());
+
         self.refresh_master();
-        is_master
+        let master = self.master.device_number;
+        let master_changed = prev_master != master;
+
+        tracing::trace!(
+            target: "timing.ingest",
+            source = ?m.source,
+            kind = ?m.kind,
+            device = m.device_number,
+            bpm = %format!("{:.2}", m.bpm),
+            effective_bpm = %format!("{:.2}", m.effective_bpm),
+            beat_in_bar = m.beat_in_bar,
+            beat_phase = m.beat_phase.map(|v| format!("{v:.3}")),
+            bar_phase = m.bar_phase.map(|v| format!("{v:.3}")),
+            playhead_ms = m.playhead_ms,
+            age_ms = 0u64,
+            master,
+            master_changed,
+            "Timing measurement observed"
+        );
+
+        master == bp.device_number
     }
 
-    pub fn apply_abs_position(&mut self, ap: &AbsPositionPacket) -> bool {
+    pub fn apply_abs_position(&mut self, ap: &AbsPositionPacket, received_at: Instant) -> bool {
         let window = self.bpm_smooth_window;
         let dev = self.device_mut(ap.device_number);
         dev.playhead_ms = Some(ap.playhead_ms);
@@ -281,9 +318,41 @@ impl DjState {
             let within = (ap.playhead_ms as f64) % beat_dur;
             dev.beat_phase = (within / beat_dur).clamp(0.0, 1.0);
         }
-        let is_master = self.master.device_number == ap.device_number;
+
+        let prev_master = self.master.device_number;
+
+        let m = TimingMeasurement::from_prolink_abs_position(ap, received_at);
+        self.timing.observe(m.clone());
+
         self.refresh_master();
-        is_master
+        let master = self.master.device_number;
+        let master_changed = prev_master != master;
+
+        let should_log = self
+            .abspos_ingest_trace
+            .should_log(received_at, std::time::Duration::from_secs(1))
+            || master_changed;
+
+        if should_log {
+            tracing::trace!(
+                target: "timing.ingest",
+                source = ?m.source,
+                kind = ?m.kind,
+                device = m.device_number,
+                bpm = %format!("{:.2}", m.bpm),
+                effective_bpm = %format!("{:.2}", m.effective_bpm),
+                beat_in_bar = m.beat_in_bar,
+                beat_phase = m.beat_phase.map(|v| format!("{v:.3}")),
+                bar_phase = m.bar_phase.map(|v| format!("{v:.3}")),
+                playhead_ms = m.playhead_ms,
+                age_ms = 0u64,
+                master,
+                master_changed,
+                "Timing measurement observed"
+            );
+        }
+
+        master == ap.device_number
     }
 
     fn refresh_master(&mut self) {
@@ -382,7 +451,9 @@ impl DjState {
         beat_phase: f64,
         is_playing: bool,
         beat_crossed: bool,
+        received_at: Instant,
     ) {
+        let prev_master = self.master.device_number;
         let link_master = MasterState {
             device_number: 0,
             source: Some(BeatSource::AbletonLink),
@@ -393,22 +464,78 @@ impl DjState {
             beat_phase,
             is_playing,
             last_beat_at: if beat_crossed {
-                Some(Instant::now())
+                Some(received_at)
             } else {
                 self.master.last_beat_at
             },
             is_virtual_master: false,
             phrase_16_beat: 0,
         };
+
+        self.timing
+            .observe(TimingMeasurement::from_link(
+                bpm,
+                beat_in_bar,
+                bar_phase,
+                beat_phase,
+                is_playing,
+                received_at,
+            ));
         self.last_link_master = Some(link_master.clone());
+
+        // Bounded ingest TRACE (beat crossings and/or at most 1Hz), regardless of
+        // whether Link becomes the active master under the current source mode.
+        let has_link_peers = self.link_peer_count > 0;
+        let prolink_active =
+            self.master.source == Some(BeatSource::ProLink) && self.master.bpm > 0.0;
+
+        let will_set_master = match self.source_mode {
+            Source::ProLink => false,
+            Source::Auto if prolink_active && !has_link_peers => false,
+            _ => true,
+        };
+
+        let master_after = if will_set_master { 0 } else { prev_master };
+        let master_changed = master_after != prev_master;
+        let beat_edge = beat_crossed && self.last_link_logged_beat_in_bar != Some(beat_in_bar);
+        let should_log = beat_edge
+            || master_changed
+            || self
+                .link_ingest_trace
+                .should_log(received_at, std::time::Duration::from_secs(1));
+
+        if should_log {
+            if beat_edge {
+                self.last_link_logged_beat_in_bar = Some(beat_in_bar);
+            }
+            tracing::trace!(
+                target: "timing.ingest",
+                source = "AbletonLink",
+                kind = "AbletonLink",
+                device = "-",
+                bpm = %format!("{bpm:.2}"),
+                effective_bpm = %format!("{bpm:.2}"),
+                beat_in_bar,
+                beat_phase = %format!("{beat_phase:.3}"),
+                bar_phase = %format!("{bar_phase:.3}"),
+                playhead_ms = "-",
+                age_ms = 0u64,
+                playing = is_playing,
+                beat_crossed,
+                beat_crossed_edge = beat_edge,
+                peers = self.link_peer_count,
+                source_mode = ?self.source_mode,
+                prolink_active,
+                master_before = prev_master,
+                master_after,
+                master_changed,
+                "Timing measurement observed"
+            );
+        }
 
         if self.source_mode == Source::ProLink {
             return;
         }
-
-        let has_link_peers = self.link_peer_count > 0;
-        let prolink_active =
-            self.master.source == Some(BeatSource::ProLink) && self.master.bpm > 0.0;
 
         if self.source_mode == Source::Auto && prolink_active && !has_link_peers {
             return;
@@ -521,7 +648,7 @@ mod tests {
         let mut state = DjState::new(30);
 
         state.set_link_peer_count(2);
-        state.apply_link_state(120.0, 1, 0.0, 0.5, true, true);
+        state.apply_link_state(120.0, 1, 0.0, 0.5, true, true, Instant::now());
 
         assert_eq!(state.master.source, Some(BeatSource::AbletonLink));
         assert_eq!(state.master.bpm, 120.0);
@@ -540,13 +667,13 @@ mod tests {
             pitch_pct: 0.0,
         };
 
-        state.apply_beat(&beat);
+        state.apply_beat(&beat, Instant::now());
 
         assert_eq!(state.master.source, Some(BeatSource::AbletonLink));
         assert_eq!(state.master.bpm, 120.0);
 
         state.set_link_peer_count(0);
-        state.apply_beat(&beat);
+        state.apply_beat(&beat, Instant::now());
 
         assert_eq!(state.master.source, Some(BeatSource::ProLink));
         assert_eq!(state.master.bpm, 130.0);
@@ -569,17 +696,17 @@ mod tests {
             pitch_pct: 0.0,
         };
 
-        state.apply_beat(&beat);
+        state.apply_beat(&beat, Instant::now());
         assert_eq!(state.master.source, Some(BeatSource::ProLink));
         assert_eq!(state.master.bpm, 125.0);
 
-        state.apply_link_state(120.0, 1, 0.0, 0.5, true, true);
+        state.apply_link_state(120.0, 1, 0.0, 0.5, true, true, Instant::now());
 
         assert_eq!(state.master.source, Some(BeatSource::ProLink));
         assert_eq!(state.master.bpm, 125.0);
 
         state.set_link_peer_count(1);
-        state.apply_link_state(120.0, 1, 0.0, 0.5, true, true);
+        state.apply_link_state(120.0, 1, 0.0, 0.5, true, true, Instant::now());
 
         assert_eq!(state.master.source, Some(BeatSource::AbletonLink));
         assert_eq!(state.master.bpm, 120.0);
@@ -601,16 +728,16 @@ mod tests {
             pitch_pct: 0.0,
         };
 
-        state.apply_beat(&beat);
+        state.apply_beat(&beat, Instant::now());
         assert_eq!(state.master.source, Some(BeatSource::ProLink));
 
         state.set_source_mode(Source::Link);
         assert_eq!(state.master.source, None);
 
-        state.apply_link_state(120.0, 1, 0.0, 0.5, true, true);
+        state.apply_link_state(120.0, 1, 0.0, 0.5, true, true, Instant::now());
         assert_eq!(state.master.source, Some(BeatSource::AbletonLink));
 
-        state.apply_beat(&beat);
+        state.apply_beat(&beat, Instant::now());
         assert_eq!(state.master.source, Some(BeatSource::AbletonLink));
         assert_eq!(state.master.bpm, 120.0);
     }
@@ -632,14 +759,14 @@ mod tests {
         };
 
         state.set_link_peer_count(2);
-        state.apply_link_state(120.0, 1, 0.0, 0.5, true, true);
+        state.apply_link_state(120.0, 1, 0.0, 0.5, true, true, Instant::now());
         assert_eq!(state.master.source, Some(BeatSource::AbletonLink));
 
         state.set_source_mode(Source::ProLink);
-        state.apply_beat(&beat);
+        state.apply_beat(&beat, Instant::now());
         assert_eq!(state.master.source, Some(BeatSource::ProLink));
 
-        state.apply_link_state(121.0, 2, 0.25, 0.5, true, true);
+        state.apply_link_state(121.0, 2, 0.25, 0.5, true, true, Instant::now());
         assert_eq!(state.master.source, Some(BeatSource::ProLink));
         assert_eq!(state.master.bpm, 126.0);
     }
