@@ -11,11 +11,12 @@ pub fn spawn(
     let TaskContext {
         dj_state: _,
         cfg: _,
+        timing_tx: _,
         device_tx,
         beat_tx,
         status_tx,
         vcdjready_tx,
-        midi_conn: _,
+        midi_out: _,
         midi_activity: _,
         track_change_tx: _,
     } = ctx;

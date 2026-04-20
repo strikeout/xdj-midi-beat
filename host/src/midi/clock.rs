@@ -20,6 +20,7 @@ use crate::midi::MidiTransport;
 use crate::config::SharedConfig;
 use crate::prolink::beat_listener::BeatEvent;
 use crate::state::{BeatSource, SharedState};
+use crate::state::timing::{MeasurementKind, TimingMeasurement, TimingSnapshot, TimingSource};
 use crate::tui::state::MidiActivity;
 
 // ── MIDI byte constants ───────────────────────────────────────────────────────
@@ -115,6 +116,109 @@ fn beat_timing_delta_ms(cs: &ClockState, beat_at: Instant) -> Option<f64> {
     }
 }
 
+fn measurement_matches_master(
+    master_source: Option<BeatSource>,
+    master_device_number: u8,
+    measurement: &TimingMeasurement,
+) -> bool {
+    match measurement.source {
+        TimingSource::AbletonLink => master_source == Some(BeatSource::AbletonLink),
+        TimingSource::ProLink => {
+            master_source != Some(BeatSource::AbletonLink)
+                && (master_device_number == 0 || measurement.device_number == Some(master_device_number))
+        }
+    }
+}
+
+fn beat_at_from_measurement(cs: &ClockState, now: Instant, measurement: &TimingMeasurement) -> Option<Instant> {
+    let beat_phase = measurement.beat_phase?;
+    if cs.interval_ns == 0 {
+        return None;
+    }
+
+    let interval = Duration::from_nanos(cs.interval_ns);
+    let phase_secs = beat_phase.clamp(0.0, 1.0) * interval.as_secs_f64();
+    now.checked_sub(Duration::from_secs_f64(phase_secs))
+}
+
+fn handle_timing_snapshot(
+    cs: &mut ClockState,
+    state: &SharedState,
+    midi: &Arc<dyn MidiTransport>,
+    activity: &Arc<Mutex<MidiActivity>>,
+    stable_beats: u8,
+    now: Instant,
+) {
+    let (master, snapshot) = {
+        let st = state.read();
+        (st.master.clone(), st.timing.snapshot_at(now))
+    };
+
+    let TimingSnapshot::Fresh { measurement, .. } = snapshot else {
+        return;
+    };
+
+    if !measurement_matches_master(master.source, master.device_number, &measurement) {
+        return;
+    }
+
+    cs.set_bpm(measurement.effective_bpm);
+
+    if let Some(mut a) = activity.try_lock() {
+        a.clock_running = cs.running;
+        a.clock_waiting_for_phrase = cs.waiting_for_downbeat;
+        a.clock_wait_beats_seen = cs.wait_beats_seen;
+        a.clock_phrase_beat = cs.beat_count;
+        a.clock_pulse_index = cs.pulse_index;
+        if let Some(beat_at) = beat_at_from_measurement(cs, now, &measurement) {
+            a.clock_timing_delta_ms = beat_timing_delta_ms(cs, beat_at);
+        }
+    }
+
+    let phrase_beat = if master.phrase_16_beat > 0 {
+        master.phrase_16_beat as u32
+    } else {
+        ((cs.beat_count as u32) % 16) + 1
+    };
+
+    let beat_in_bar = measurement.beat_in_bar.unwrap_or(master.beat_in_bar);
+
+    if cs.waiting_for_downbeat {
+        if matches!(measurement.kind, MeasurementKind::ProLinkBeatPacket | MeasurementKind::AbletonLink)
+            && beat_in_bar == 1
+        {
+            cs.wait_beats_seen = cs.wait_beats_seen.saturating_add(1);
+            let fallback_start = cs.wait_beats_seen >= stable_beats.max(1);
+            if phrase_beat == 1 || fallback_start {
+                cs.waiting_for_downbeat = false;
+                cs.running = true;
+                cs.beat_count = 1;
+                cs.wait_beats_seen = 0;
+                cs.has_started = true;
+                let _ = midi.send_message(&[MSG_START]);
+                if let Some(mut a) = activity.try_lock() {
+                    a.clock_last_start_at = Some(Instant::now());
+                    a.clock_running = true;
+                    a.clock_waiting_for_phrase = false;
+                    a.clock_wait_beats_seen = 0;
+                    a.clock_phrase_beat = cs.beat_count;
+                    a.clock_pulse_index = cs.pulse_index;
+                    if let Some(beat_at) = beat_at_from_measurement(cs, now, &measurement) {
+                        a.clock_timing_delta_ms = beat_timing_delta_ms(cs, beat_at);
+                    }
+                }
+                cs.pulse_index = 0;
+                cs.last_pulse = now;
+            }
+        }
+    } else if cs.running {
+        if let Some(beat_at) = beat_at_from_measurement(cs, now, &measurement) {
+            apply_phase_correction(cs, beat_at);
+        }
+        cs.beat_count = phrase_beat as u8;
+    }
+}
+
 // ── Phase correction ──────────────────────────────────────────────────────────
 
 /// Maximum correction we will apply in one shot (1/4 of a pulse interval).
@@ -159,6 +263,7 @@ fn apply_phase_correction(cs: &mut ClockState, beat_at: Instant) {
 // ── Beat event handler ────────────────────────────────────────────────────────
 
 /// Process a single beat event, updating clock BPM and phase correction.
+#[allow(dead_code)]
 fn handle_beat_event(
     cs: &mut ClockState,
     state: &SharedState,
@@ -309,6 +414,7 @@ fn handle_beat_event(
 
 
 /// Drain all queued beat events without blocking.
+#[allow(dead_code)]
 fn drain_beat_events(
     cs: &mut ClockState,
     state: &SharedState,
@@ -356,6 +462,7 @@ pub async fn run(
     cfg: SharedConfig,
     activity: Arc<Mutex<MidiActivity>>,
     mut cfg_change_rx: watch::Receiver<()>,
+    mut timing_rx: watch::Receiver<()>,
 ) {
     let mut cs = ClockState::new();
     let mut clock_enabled = cfg.read().midi.clock_enabled;
@@ -439,8 +546,6 @@ pub async fn run(
         let sleep_dur = next_pulse_at.saturating_duration_since(Instant::now());
         let deadline = tokio::time::Instant::now() + sleep_dur;
 
-        let stable_beats = cfg.read().midi.phrase_lock_stable_beats;
-
         // ── Wait for next pulse deadline OR a beat event ─────────────────────
         tokio::select! {
             _ = tokio::time::sleep_until(deadline) => {}
@@ -449,12 +554,15 @@ pub async fn run(
                     // Sender dropped; keep running.
                 }
             }
+            changed = timing_rx.changed() => {
+                if changed.is_ok() {
+                    let stable_beats = cfg.read().midi.phrase_lock_stable_beats;
+                    handle_timing_snapshot(&mut cs, &state, &midi, &activity, stable_beats, Instant::now());
+                }
+            }
             evt = beat_rx.recv() => {
                 match evt {
-                    Ok(evt) => {
-                        handle_beat_event(&mut cs, &state, &midi, &activity, stable_beats, evt);
-                        drain_beat_events(&mut cs, &state, &midi, &activity, stable_beats, &mut beat_rx);
-                    }
+                    Ok(_) => {}
                     Err(broadcast::error::RecvError::Closed) => return,
                     Err(broadcast::error::RecvError::Lagged(_)) => {}
                 }

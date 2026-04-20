@@ -4,6 +4,7 @@ use std::time::Duration;
 use parking_lot::Mutex;
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
+use tokio::sync::watch;
 
 use crate::app::AppContext;
 use crate::config::SharedConfig;
@@ -11,8 +12,7 @@ use crate::prolink::beat_listener::BeatEvent;
 use crate::prolink::status_listener::StatusEvent;
 use crate::prolink::virtual_cdj::VirtualCdjReady;
 use crate::state::SharedState;
-use crate::tui::state::{LogBuffer, MidiActivity};
-use crate::tui::SwappableMidiConn;
+use crate::tui::state::MidiActivity;
 
 pub mod applier;
 pub mod link;
@@ -24,11 +24,12 @@ pub mod prolink;
 pub struct TaskContext {
     pub dj_state: SharedState,
     pub cfg: SharedConfig,
+    pub timing_tx: watch::Sender<()>,
     pub device_tx: broadcast::Sender<crate::prolink::discovery::DeviceEvent>,
     pub beat_tx: broadcast::Sender<BeatEvent>,
     pub status_tx: broadcast::Sender<StatusEvent>,
     pub vcdjready_tx: broadcast::Sender<VirtualCdjReady>,
-    pub midi_conn: Arc<Mutex<Option<midir::MidiOutputConnection>>>,
+    pub midi_out: crate::midi::MidiOutHandle,
     pub midi_activity: Arc<Mutex<MidiActivity>>,
     pub track_change_tx: mpsc::Sender<crate::state::TrackChange>,
 }
@@ -50,6 +51,7 @@ pub async fn run(ctx: AppContext, use_tui: bool) -> anyhow::Result<()> {
         dj_state,
         cfg,
         device_table,
+        log_buf,
         device_tx,
         beat_tx,
         status_tx,
@@ -65,18 +67,26 @@ pub async fn run(ctx: AppContext, use_tui: bool) -> anyhow::Result<()> {
 
     let midi_activity: Arc<Mutex<MidiActivity>> =
         Arc::new(Mutex::new(MidiActivity::default()));
+    let (cfg_change_tx, cfg_change_rx) = watch::channel(());
+    let (timing_tx, timing_rx) = watch::channel(());
 
-    let midi_conn_owned: Arc<Mutex<Option<midir::MidiOutputConnection>>> =
-        Arc::new(Mutex::new(midi_conn.lock().take()));
+    let initial_conn = midi_conn
+        .lock()
+        .take()
+        .map(|c| Box::new(crate::midi::MidirOutConnection(c)) as Box<dyn crate::midi::MidiOutConnection>);
+
+    // Bounded queue: producers must never block on MIDI output.
+    let midi_out = crate::midi::MidiOutHandle::start(2048, initial_conn);
 
     let task_ctx = TaskContext {
         dj_state: Arc::clone(&dj_state),
         cfg: Arc::clone(&cfg),
+        timing_tx: timing_tx.clone(),
         device_tx: device_tx.clone(),
         beat_tx: beat_tx.clone(),
         status_tx: status_tx.clone(),
         vcdjready_tx: vcdjready_tx.clone(),
-        midi_conn: Arc::clone(&midi_conn_owned),
+        midi_out: midi_out.clone(),
         midi_activity: Arc::clone(&midi_activity),
         track_change_tx: track_change_tx.clone(),
     };
@@ -108,21 +118,21 @@ pub async fn run(ctx: AppContext, use_tui: bool) -> anyhow::Result<()> {
 
     logger::spawn(task_ctx.clone(), device_rx);
 
-    midi::spawn(task_ctx, beat_rx3, status_rx2);
+    midi::spawn(task_ctx, beat_rx3, status_rx2, cfg_change_rx, timing_rx);
 
     if use_tui {
-        let midi_conn_swap: SwappableMidiConn = midi_conn_owned;
         crate::tui::run(
             dj_state,
             device_table,
             cfg,
-            midi_conn_swap,
-            LogBuffer::new(),
+            midi_out,
+            log_buf,
             midi_activity,
+            cfg_change_tx,
         )
         .await
     } else {
-        crate::app::headless_loop(dj_state, midi_conn_owned).await
+        crate::app::headless_loop(dj_state, midi_out).await
     }
 }
 

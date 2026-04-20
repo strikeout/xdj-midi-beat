@@ -16,35 +16,42 @@ pub fn spawn(
 ) {
     let dj_state = Arc::clone(&ctx.dj_state);
     let cfg = Arc::clone(&ctx.cfg);
+    let timing_tx = ctx.timing_tx.clone();
 
-    tokio::spawn(beat_applier(dj_state.clone(), cfg.clone(), beat_rx));
+    tokio::spawn(beat_applier(dj_state.clone(), cfg.clone(), beat_rx, timing_tx.clone()));
 
-    tokio::spawn(status_applier(dj_state, cfg, status_rx, track_change_tx));
+    tokio::spawn(status_applier(dj_state, cfg, status_rx, track_change_tx, timing_tx));
 }
 
 async fn beat_applier(
     state: Arc<parking_lot::RwLock<crate::state::DjState>>,
     cfg: Arc<parking_lot::RwLock<crate::config::Config>>,
     mut rx: broadcast::Receiver<BeatEvent>,
+    timing_tx: tokio::sync::watch::Sender<()>,
 ) {
     loop {
         match rx.recv().await {
-            Ok(BeatEvent::Beat(bp)) => {
+            Ok(BeatEvent::Beat {
+                packet: bp,
+                received_at,
+            }) => {
                 let smoothing_ms = cfg.read().midi.smoothing_ms;
                 let mut state = state.write();
                 state.set_smoothing_ms(smoothing_ms);
-                state.apply_beat(&bp);
+                state.apply_beat(&bp, received_at);
+                let _ = timing_tx.send(());
             }
-            Ok(BeatEvent::AbsPosition(ap)) => {
+            Ok(BeatEvent::AbsPosition {
+                packet: ap,
+                received_at,
+            }) => {
                 let smoothing_ms = cfg.read().midi.smoothing_ms;
                 let mut state = state.write();
                 state.set_smoothing_ms(smoothing_ms);
-                state.apply_abs_position(&ap);
+                state.apply_abs_position(&ap, received_at);
+                let _ = timing_tx.send(());
             }
-            Ok(BeatEvent::LinkBeat { bpm, beat_in_bar, bar_phase, beat_phase }) => {
-                let mut state = state.write();
-                state.apply_link_state(bpm, beat_in_bar, bar_phase, beat_phase, true, true);
-            }
+            Ok(BeatEvent::LinkBeat { .. }) => {}
             Err(broadcast::error::RecvError::Closed) => break,
             Err(broadcast::error::RecvError::Lagged(n)) => {
                 tracing::warn!("Beat applier lagged, dropped {n} events");
@@ -58,6 +65,7 @@ async fn status_applier(
     cfg: Arc<parking_lot::RwLock<crate::config::Config>>,
     mut rx: broadcast::Receiver<StatusEvent>,
     track_change_tx: mpsc::Sender<TrackChange>,
+    timing_tx: tokio::sync::watch::Sender<()>,
 ) {
     loop {
         tokio::select! {
@@ -69,6 +77,7 @@ async fn status_applier(
                         state.set_smoothing_ms(smoothing_ms);
                         let change = state.apply_cdj_status(&s);
                         drop(state);
+                        let _ = timing_tx.send(());
                         if let Some(tc) = change {
                             let _ = track_change_tx.try_send(tc);
                         }
@@ -78,6 +87,7 @@ async fn status_applier(
                         let mut state = state.write();
                         state.set_smoothing_ms(smoothing_ms);
                         state.apply_mixer_status(&s);
+                        let _ = timing_tx.send(());
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                     Err(broadcast::error::RecvError::Lagged(n)) => {
@@ -93,21 +103,24 @@ async fn status_applier(
 mod tests {
     use super::*;
     use crate::config::{new_shared, Config};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     fn beat(device_number: u8, bpm: f64) -> BeatEvent {
-        BeatEvent::Beat(crate::prolink::packets::BeatPacket {
-            device_number,
-            next_beat_ms: 500,
-            second_beat_ms: 1000,
-            next_bar_ms: 2000,
-            pitch_raw: crate::prolink::PITCH_NORMAL,
-            bpm_raw: (bpm * 100.0) as u16,
-            beat_in_bar: 1,
-            track_bpm: Some(bpm),
-            effective_bpm: bpm,
-            pitch_pct: 0.0,
-        })
+        BeatEvent::Beat {
+            packet: crate::prolink::packets::BeatPacket {
+                device_number,
+                next_beat_ms: 500,
+                second_beat_ms: 1000,
+                next_bar_ms: 2000,
+                pitch_raw: crate::prolink::PITCH_NORMAL,
+                bpm_raw: (bpm * 100.0) as u16,
+                beat_in_bar: 1,
+                track_bpm: Some(bpm),
+                effective_bpm: bpm,
+                pitch_pct: 0.0,
+            },
+            received_at: Instant::now(),
+        }
     }
 
     #[tokio::test]
@@ -116,8 +129,14 @@ mod tests {
         cfg.write().midi.smoothing_ms = 1000;
         let state = crate::state::new_shared(1000);
         let (tx, rx) = broadcast::channel(8);
+        let (timing_tx, _timing_rx) = tokio::sync::watch::channel(());
 
-        let handle = tokio::spawn(beat_applier(Arc::clone(&state), Arc::clone(&cfg), rx));
+        let handle = tokio::spawn(beat_applier(
+            Arc::clone(&state),
+            Arc::clone(&cfg),
+            rx,
+            timing_tx,
+        ));
 
         let _ = tx.send(beat(1, 100.0));
         tokio::time::sleep(Duration::from_millis(20)).await;

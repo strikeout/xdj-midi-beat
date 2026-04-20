@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 use rusty_link::{AblLink, SessionState};
 use tokio::sync::broadcast;
+use tokio::sync::watch;
 
 use crate::config::LinkConfig;
 use crate::prolink::beat_listener::BeatEvent;
@@ -16,6 +17,7 @@ pub async fn run(
     link_cfg: LinkConfig,
     state: SharedState,
     beat_tx: broadcast::Sender<BeatEvent>,
+    timing_tx: watch::Sender<()>,
     mut link: AblLink,
 ) {
     tracing::info!("Ableton Link engine entering run loop...");
@@ -66,7 +68,7 @@ pub async fn run(
         if last_heartbeat.elapsed() >= Duration::from_secs(1) {
             let n = link.num_peers();
             let bpm = session.tempo();
-            tracing::info!(peers = n, bpm = %format!("{:.2}", bpm), "Ableton Link engine loop");
+            tracing::trace!(peers = n, bpm = %format!("{:.2}", bpm), "Ableton Link engine loop");
             last_heartbeat = Instant::now();
         }
 
@@ -104,6 +106,7 @@ pub async fn run(
         let playing_changed = is_playing != last_is_playing;
 
         if beat_crossed || should_push_phase || playing_changed || first_sample {
+            let received_at = Instant::now();
             state.write().apply_link_state(
                 bpm,
                 beat_in_bar,
@@ -111,23 +114,26 @@ pub async fn run(
                 beat_phase,
                 is_playing,
                 beat_crossed,
+                received_at,
             );
-        }
+            let _ = timing_tx.send(());
 
-        if beat_crossed && is_playing {
-            let _ = beat_tx.send(BeatEvent::LinkBeat {
-                bpm,
-                beat_in_bar,
-                bar_phase,
-                beat_phase,
-            });
-            last_beat_floor = beat_floor;
-            tracing::debug!(
-                bpm = %format!("{:.2}", bpm),
-                beat_in_bar,
-                bar_phase = %format!("{:.3}", bar_phase),
-                "Link beat"
-            );
+            if beat_crossed && is_playing {
+                let _ = beat_tx.send(BeatEvent::LinkBeat {
+                    bpm,
+                    beat_in_bar,
+                    bar_phase,
+                    beat_phase,
+                    received_at,
+                });
+                last_beat_floor = beat_floor;
+                tracing::debug!(
+                    bpm = %format!("{:.2}", bpm),
+                    beat_in_bar,
+                    bar_phase = %format!("{:.3}", bar_phase),
+                    "Link beat"
+                );
+            }
         }
 
         if playing_changed {
