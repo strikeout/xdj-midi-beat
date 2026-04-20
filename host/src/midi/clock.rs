@@ -234,8 +234,8 @@ fn handle_timing_snapshot(
 
 // ── Phase correction ──────────────────────────────────────────────────────────
 
-/// Maximum correction we will apply in one shot (1/4 of a pulse interval).
-const MAX_CORRECTION_FRACTION: f64 = 0.25;
+/// Maximum correction we will apply in one shot (3/4 of a pulse interval).
+const MAX_CORRECTION_FRACTION: f64 = 0.75;
 
 /// When a beat arrives, compute how far off our clock is and nudge `last_pulse`
 /// to correct it.  We correct by at most MAX_CORRECTION_FRACTION of an
