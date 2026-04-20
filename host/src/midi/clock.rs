@@ -244,32 +244,36 @@ fn apply_phase_correction(cs: &mut ClockState, beat_at: Instant) {
     if cs.interval_ns == 0 {
         return;
     }
-    // Ideal: beat_at should land exactly on pulse_index == 0.
-    let elapsed_since_last = beat_at.saturating_duration_since(cs.last_pulse);
-    let elapsed_ns = elapsed_since_last.as_nanos() as u64;
 
-    // How many pulses should have elapsed?
-    let pulses_elapsed = elapsed_ns / cs.interval_ns;
-    // Remainder: how far past the last pulse boundary are we?
-    let remainder_ns = elapsed_ns % cs.interval_ns;
+    // Error of beat relative to nearest pulse boundary in [-interval/2, +interval/2].
+    let interval = cs.interval_ns as i128;
+    let elapsed_ns = beat_at.saturating_duration_since(cs.last_pulse).as_nanos() as i128;
+    let remainder = elapsed_ns.rem_euclid(interval);
+    let signed_error_ns = if remainder > interval / 2 {
+        remainder - interval
+    } else {
+        remainder
+    };
 
-    // We want remainder to be 0 (we are exactly at a pulse boundary).
-    // If remainder > interval/2 we are late; if < interval/2 we are early.
-    let interval = cs.interval_ns;
-    let max_corr = (interval as f64 * MAX_CORRECTION_FRACTION) as u64;
+    // Bounded correction avoids audible jumps but keeps long-run phase locked.
+    let max_corr_ns = (interval as f64 * MAX_CORRECTION_FRACTION).round() as i128;
+    let correction_ns = signed_error_ns.clamp(-max_corr_ns, max_corr_ns);
 
-    if remainder_ns > interval / 2 {
-        // Late: advance last_pulse forward by up to max_corr ns.
-        let correction = (remainder_ns - interval / 2).min(max_corr);
-        cs.last_pulse = beat_at - Duration::from_nanos(elapsed_ns - correction);
-    } else if remainder_ns > 0 && remainder_ns < interval / 2 {
-        // Early: push last_pulse back by up to max_corr ns.
-        let correction = remainder_ns.min(max_corr);
-        cs.last_pulse = beat_at - Duration::from_nanos(elapsed_ns + correction);
+    if correction_ns > 0 {
+        cs.last_pulse += Duration::from_nanos(correction_ns as u64);
+    } else if correction_ns < 0 {
+        let back = Duration::from_nanos((-correction_ns) as u64);
+        cs.last_pulse = cs.last_pulse.checked_sub(back).unwrap_or(cs.last_pulse);
     }
 
-    // Snap pulse_index to 0 at beat boundary.
-    let _ = pulses_elapsed; // already consumed above
+    tracing::trace!(
+        target: "midi.clock",
+        error_ns = signed_error_ns,
+        correction_ns,
+        interval_ns = cs.interval_ns,
+        "Applied bounded phase correction"
+    );
+
     cs.pulse_index = 0;
 }
 
@@ -769,13 +773,26 @@ pub async fn run(
             let now = Instant::now();
             let elapsed = now.duration_since(cs.last_pulse).as_nanos() as u64;
             if elapsed >= cs.interval_ns {
-                let overshoot = elapsed - cs.interval_ns;
-                cs.last_pulse = now - Duration::from_nanos(overshoot.min(cs.interval_ns / 2));
-                cs.pulse_index = (cs.pulse_index + 1) % PPQ;
-                let _ = midi.send_message(&[MSG_CLOCK]);
+                let intervals_elapsed = (elapsed / cs.interval_ns).max(1);
+                cs.last_pulse += Duration::from_nanos(intervals_elapsed.saturating_mul(cs.interval_ns));
+                cs.pulse_index = (cs.pulse_index + intervals_elapsed) % PPQ;
+                for _ in 0..intervals_elapsed {
+                    let _ = midi.send_message(&[MSG_CLOCK]);
+                }
+
+                if intervals_elapsed > 1 {
+                    tracing::trace!(
+                        target: "midi.clock",
+                        intervals_elapsed,
+                        elapsed_ns = elapsed,
+                        interval_ns = cs.interval_ns,
+                        "Clock late wake: skipped overdue pulse boundaries without bursting"
+                    );
+                }
+
                 {
                     if let Some(mut a) = activity.try_lock() {
-                        a.clock_pulses += 1;
+                        a.clock_pulses += intervals_elapsed;
                         a.clock_last_pulse_at = Some(Instant::now());
                         a.clock_running = cs.running;
                         a.clock_waiting_for_phrase = cs.waiting_for_downbeat;
