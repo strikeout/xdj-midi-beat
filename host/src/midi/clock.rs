@@ -491,6 +491,57 @@ fn handle_master_change_without_phrase_wait(
     }
 }
 
+fn handle_prolink_beat_loop_disabled(
+    cs: &mut ClockState,
+    state: &SharedState,
+    midi: &Arc<dyn MidiTransport>,
+    activity: &Arc<Mutex<MidiActivity>>,
+    evt: BeatEvent,
+) {
+    let BeatEvent::Beat { packet: bp, received_at } = evt else {
+        return;
+    };
+
+    let master = state.read().master.clone();
+    if master.source == Some(BeatSource::AbletonLink) {
+        return;
+    }
+
+    let master_num = master.device_number;
+    let master_is_set = master_num > 0;
+    let from_master = bp.device_number == master_num;
+    if master_is_set && !from_master {
+        return;
+    }
+
+    cs.set_bpm(bp.effective_bpm);
+    cs.waiting_for_downbeat = false;
+
+    if cs.running {
+        apply_phase_correction(cs, received_at);
+    } else {
+        cs.running = true;
+        cs.pulse_index = 0;
+        cs.last_pulse = received_at;
+        let msg = if cs.has_started { MSG_CONTINUE } else { MSG_START };
+        cs.has_started = true;
+        let _ = midi.send_message(&[msg]);
+        let _ = midi.send_message(&[MSG_CLOCK]);
+
+        if let Some(mut a) = activity.try_lock() {
+            a.clock_pulses += 1;
+            a.clock_last_pulse_at = Some(Instant::now());
+            a.clock_last_start_at = Some(Instant::now());
+            a.clock_running = true;
+            a.clock_waiting_for_phrase = false;
+            a.clock_wait_beats_seen = 0;
+            a.clock_phrase_beat = cs.beat_count;
+            a.clock_pulse_index = cs.pulse_index;
+            a.clock_timing_delta_ms = beat_timing_delta_ms(cs, received_at);
+        }
+    }
+}
+
 // ── Main clock task ───────────────────────────────────────────────────────────
 
 pub async fn run(
@@ -624,7 +675,11 @@ pub async fn run(
             }
             evt = beat_rx.recv() => {
                 match evt {
-                    Ok(_) => {}
+                    Ok(evt) => {
+                        if clock_enabled && !clock_loop_enabled {
+                            handle_prolink_beat_loop_disabled(&mut cs, &state, &midi, &activity, evt);
+                        }
+                    }
                     Err(broadcast::error::RecvError::Closed) => return,
                     Err(broadcast::error::RecvError::Lagged(_)) => {}
                 }
@@ -639,43 +694,55 @@ pub async fn run(
         let (bpm, is_playing) = (cached_bpm, cached_is_playing);
 
         // ── Start / Stop / Continue messages ─────────────────────────────────
-        if clock_enabled && is_playing && !cs.running && !cs.waiting_for_downbeat {
-            cs.running = true;
-            cs.pulse_index = 0;
-            cs.last_pulse = Instant::now();
-            if bpm > 0.0 {
-                cs.set_bpm(bpm);
-            }
-            let msg = if cs.has_started { MSG_CONTINUE } else { MSG_START };
-            cs.has_started = true;
-            // Send Start/Continue followed by the first clock pulse
-            // immediately (MIDI spec: clock should follow Start without delay).
-            let _ = midi.send_message(&[msg]);
-            let _ = midi.send_message(&[MSG_CLOCK]);
-            {
-                if let Some(mut a) = activity.try_lock() {
-                    a.clock_pulses += 1;
-                    a.clock_last_pulse_at = Some(Instant::now());
-                    a.clock_running = cs.running;
-                    a.clock_waiting_for_phrase = cs.waiting_for_downbeat;
-                    a.clock_wait_beats_seen = cs.wait_beats_seen;
-                    a.clock_phrase_beat = cs.beat_count;
-                    a.clock_pulse_index = cs.pulse_index;
-                    if msg == MSG_START {
-                        a.clock_last_start_at = Some(Instant::now());
+        if clock_loop_enabled {
+            if clock_enabled && is_playing && !cs.running && !cs.waiting_for_downbeat {
+                cs.running = true;
+                cs.pulse_index = 0;
+                cs.last_pulse = Instant::now();
+                if bpm > 0.0 {
+                    cs.set_bpm(bpm);
+                }
+                let msg = if cs.has_started { MSG_CONTINUE } else { MSG_START };
+                cs.has_started = true;
+                // Send Start/Continue followed by the first clock pulse
+                // immediately (MIDI spec: clock should follow Start without delay).
+                let _ = midi.send_message(&[msg]);
+                let _ = midi.send_message(&[MSG_CLOCK]);
+                {
+                    if let Some(mut a) = activity.try_lock() {
+                        a.clock_pulses += 1;
+                        a.clock_last_pulse_at = Some(Instant::now());
+                        a.clock_running = cs.running;
+                        a.clock_waiting_for_phrase = cs.waiting_for_downbeat;
+                        a.clock_wait_beats_seen = cs.wait_beats_seen;
+                        a.clock_phrase_beat = cs.beat_count;
+                        a.clock_pulse_index = cs.pulse_index;
+                        if msg == MSG_START {
+                            a.clock_last_start_at = Some(Instant::now());
+                        }
                     }
                 }
+                tracing::debug!(msg = if msg == MSG_START { "Start" } else { "Continue" }, "MIDI transport sent");
+            } else if (!clock_enabled || !is_playing) && cs.running {
+                cs.running = false;
+                let _ = midi.send_message(&[MSG_STOP]);
+                tracing::debug!("MIDI Stop sent");
             }
-            tracing::debug!(msg = if msg == MSG_START { "Start" } else { "Continue" }, "MIDI transport sent");
-        } else if (!clock_enabled || !is_playing) && cs.running {
+        } else if !clock_enabled && cs.running {
             cs.running = false;
             let _ = midi.send_message(&[MSG_STOP]);
             tracing::debug!("MIDI Stop sent");
         }
 
         // ── Emit clock pulse if deadline reached ─────────────────────────────
-        if clock_enabled && cs.running && bpm > 0.0 {
-            cs.set_bpm(bpm);
+        let pulse_bpm = if clock_loop_enabled {
+            if bpm > 0.0 { bpm } else { cs.last_bpm }
+        } else {
+            cs.last_bpm
+        };
+
+        if clock_enabled && cs.running && pulse_bpm > 0.0 {
+            cs.set_bpm(pulse_bpm);
             let now = Instant::now();
             let elapsed = now.duration_since(cs.last_pulse).as_nanos() as u64;
             if elapsed >= cs.interval_ns {
