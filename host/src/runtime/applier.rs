@@ -20,7 +20,7 @@ pub fn spawn(
 
     tokio::spawn(beat_applier(dj_state.clone(), cfg.clone(), beat_rx, timing_tx.clone()));
 
-    tokio::spawn(status_applier(dj_state, cfg, status_rx, track_change_tx, timing_tx));
+    tokio::spawn(status_applier(dj_state, cfg, status_rx, track_change_tx));
 }
 
 async fn beat_applier(
@@ -65,7 +65,6 @@ async fn status_applier(
     cfg: Arc<parking_lot::RwLock<crate::config::Config>>,
     mut rx: broadcast::Receiver<StatusEvent>,
     track_change_tx: mpsc::Sender<TrackChange>,
-    timing_tx: tokio::sync::watch::Sender<()>,
 ) {
     loop {
         tokio::select! {
@@ -77,7 +76,6 @@ async fn status_applier(
                         state.set_smoothing_ms(smoothing_ms);
                         let change = state.apply_cdj_status(&s);
                         drop(state);
-                        let _ = timing_tx.send(());
                         if let Some(tc) = change {
                             let _ = track_change_tx.try_send(tc);
                         }
@@ -87,7 +85,6 @@ async fn status_applier(
                         let mut state = state.write();
                         state.set_smoothing_ms(smoothing_ms);
                         state.apply_mixer_status(&s);
-                        let _ = timing_tx.send(());
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                     Err(broadcast::error::RecvError::Lagged(n)) => {

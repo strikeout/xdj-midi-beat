@@ -54,6 +54,8 @@ struct ClockState {
     beat_count: u8,
     /// Beats observed while waiting for phrase start.
     wait_beats_seen: u8,
+    /// Last timing measurement timestamp processed from shared timing model.
+    last_timing_received_at: Option<Instant>,
 }
 
 impl ClockState {
@@ -68,6 +70,7 @@ impl ClockState {
             waiting_for_downbeat: true,
             beat_count: 0,
             wait_beats_seen: 0,
+            last_timing_received_at: None,
         }
     }
 
@@ -130,14 +133,19 @@ fn measurement_matches_master(
     }
 }
 
-fn beat_at_from_measurement(cs: &ClockState, now: Instant, measurement: &TimingMeasurement) -> Option<Instant> {
+fn beat_at_from_measurement(_cs: &ClockState, now: Instant, measurement: &TimingMeasurement) -> Option<Instant> {
     let beat_phase = measurement.beat_phase?;
-    if cs.interval_ns == 0 {
+    if measurement.effective_bpm <= 0.0 {
         return None;
     }
 
-    let interval = Duration::from_nanos(cs.interval_ns);
-    let phase_secs = beat_phase.clamp(0.0, 1.0) * interval.as_secs_f64();
+    let beat_dur_secs = 60.0 / measurement.effective_bpm;
+    let age_secs = now
+        .checked_duration_since(measurement.received_at)
+        .unwrap_or(Duration::ZERO)
+        .as_secs_f64();
+    let phase_now = (beat_phase.clamp(0.0, 1.0) + (age_secs / beat_dur_secs)).fract();
+    let phase_secs = phase_now * beat_dur_secs;
     now.checked_sub(Duration::from_secs_f64(phase_secs))
 }
 
@@ -157,6 +165,11 @@ fn handle_timing_snapshot(
     let TimingSnapshot::Fresh { measurement, .. } = snapshot else {
         return;
     };
+
+    if cs.last_timing_received_at == Some(measurement.received_at) {
+        return;
+    }
+    cs.last_timing_received_at = Some(measurement.received_at);
 
     if !measurement_matches_master(master.source, master.device_number, &measurement) {
         return;
@@ -182,10 +195,13 @@ fn handle_timing_snapshot(
     };
 
     let beat_in_bar = measurement.beat_in_bar.unwrap_or(master.beat_in_bar);
+    let is_beat_edge = matches!(
+        measurement.kind,
+        MeasurementKind::ProLinkBeatPacket | MeasurementKind::AbletonLink
+    );
 
     if cs.waiting_for_downbeat {
-        if matches!(measurement.kind, MeasurementKind::ProLinkBeatPacket | MeasurementKind::AbletonLink)
-            && beat_in_bar == 1
+        if is_beat_edge && beat_in_bar == 1
         {
             cs.wait_beats_seen = cs.wait_beats_seen.saturating_add(1);
             let fallback_start = cs.wait_beats_seen >= stable_beats.max(1);
@@ -211,7 +227,7 @@ fn handle_timing_snapshot(
                 cs.last_pulse = now;
             }
         }
-    } else if cs.running {
+    } else if cs.running && is_beat_edge {
         if let Some(beat_at) = beat_at_from_measurement(cs, now, &measurement) {
             apply_phase_correction(cs, beat_at);
         }
