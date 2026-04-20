@@ -33,11 +33,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
+use tokio::sync::broadcast;
 use tokio::sync::watch;
 
 use crate::config::{MtcFrameRate, SharedConfig};
 use crate::midi::MidiTransport;
-use crate::state::SharedState;
+use crate::prolink::beat_listener::BeatEvent;
+use crate::state::{BeatSource, SharedState};
 use crate::state::timing::{MeasurementKind, TimingSnapshot};
 use crate::tui::state::MidiActivity;
 
@@ -250,6 +252,7 @@ struct MtcScheduler {
 
     last_position_ms: i64,
     osc: Option<PositionOscillator>,
+    playing_like_override: Option<bool>,
 
     stats: MtcStats,
 }
@@ -267,6 +270,7 @@ impl MtcScheduler {
             last_cycle_frame: None,
             last_position_ms: 0,
             osc: None,
+            playing_like_override: None,
             stats: MtcStats::default(),
         }
     }
@@ -277,6 +281,10 @@ impl MtcScheduler {
 
     fn take_stats(&mut self) -> MtcStats {
         std::mem::take(&mut self.stats)
+    }
+
+    fn set_playing_like_override(&mut self, value: Option<bool>) {
+        self.playing_like_override = value;
     }
 
     fn next_wake(&self) -> Option<Instant> {
@@ -363,7 +371,9 @@ impl MtcScheduler {
             return out;
         }
 
-        let playing_like = is_playing_like(now, master_bpm, master_is_playing, master_last_beat_at);
+        let playing_like = self
+            .playing_like_override
+            .unwrap_or_else(|| is_playing_like(now, master_bpm, master_is_playing, master_last_beat_at));
 
         // Stop when transport is not playing-like.
         if !playing_like {
@@ -516,13 +526,24 @@ pub async fn run(
     state: SharedState,
     cfg: SharedConfig,
     activity: Arc<Mutex<MidiActivity>>,
+    mut beat_rx: broadcast::Receiver<BeatEvent>,
     mut timing_rx: watch::Receiver<()>,
 ) {
-    let (enabled0, frame_rate0) = {
+    let (enabled0, frame_rate0, clock_loop_enabled0) = {
         let cfg_r = cfg.read();
-        (cfg_r.midi.mtc.enabled, cfg_r.midi.mtc.frame_rate)
+        (
+            cfg_r.midi.mtc.enabled,
+            cfg_r.midi.mtc.frame_rate,
+            cfg_r.midi.clock_loop_enabled,
+        )
     };
     let mut scheduler = MtcScheduler::new(enabled0, frame_rate0);
+    let mut clock_loop_enabled = clock_loop_enabled0;
+    let mut beat_driven_playing = false;
+    let mut last_master_key = {
+        let st = state.read();
+        (st.master.source, st.master.device_number)
+    };
 
     let mut last_trace_at: Instant = Instant::now();
 
@@ -537,6 +558,20 @@ pub async fn run(
             Some(t) => {
                 tokio::select! {
                     _ = sleep_until(TokioInstant::from_std(t)) => {}
+                    evt = beat_rx.recv() => {
+                        if let Ok(BeatEvent::Beat { packet: bp, .. }) = evt {
+                            if !clock_loop_enabled {
+                                let master = state.read().master.clone();
+                                if master.source != Some(BeatSource::AbletonLink) {
+                                    let master_num = master.device_number;
+                                    let master_is_set = master_num > 0;
+                                    if !master_is_set || bp.device_number == master_num {
+                                        beat_driven_playing = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
                     changed = timing_rx.changed() => {
                         if changed.is_err() {
                             // Sender dropped; keep running.
@@ -547,6 +582,20 @@ pub async fn run(
             None => {
                 tokio::select! {
                     _ = sleep(IDLE_POLL) => {}
+                    evt = beat_rx.recv() => {
+                        if let Ok(BeatEvent::Beat { packet: bp, .. }) = evt {
+                            if !clock_loop_enabled {
+                                let master = state.read().master.clone();
+                                if master.source != Some(BeatSource::AbletonLink) {
+                                    let master_num = master.device_number;
+                                    let master_is_set = master_num > 0;
+                                    if !master_is_set || bp.device_number == master_num {
+                                        beat_driven_playing = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
                     changed = timing_rx.changed() => {
                         if changed.is_err() {
                             // Sender dropped; keep running.
@@ -558,10 +607,34 @@ pub async fn run(
 
         let now_std: Instant = TokioInstant::now().into_std();
 
-        let (enabled, frame_rate) = {
+        let (enabled, frame_rate, current_clock_loop_enabled) = {
             let cfg_r = cfg.read();
-            (cfg_r.midi.mtc.enabled, cfg_r.midi.mtc.frame_rate)
+            (
+                cfg_r.midi.mtc.enabled,
+                cfg_r.midi.mtc.frame_rate,
+                cfg_r.midi.clock_loop_enabled,
+            )
         };
+
+        if current_clock_loop_enabled != clock_loop_enabled {
+            clock_loop_enabled = current_clock_loop_enabled;
+            beat_driven_playing = false;
+        }
+
+        let current_master_key = {
+            let st = state.read();
+            (st.master.source, st.master.device_number)
+        };
+        if !clock_loop_enabled && current_master_key != last_master_key {
+            beat_driven_playing = false;
+        }
+        last_master_key = current_master_key;
+
+        if clock_loop_enabled {
+            scheduler.set_playing_like_override(None);
+        } else {
+            scheduler.set_playing_like_override(Some(beat_driven_playing));
+        }
 
         let (
             master_device,

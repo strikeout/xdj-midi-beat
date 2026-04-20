@@ -52,6 +52,7 @@ pub fn spawn(
     let dj_state3 = Arc::clone(&ctx.dj_state);
     let cfg3 = Arc::clone(&ctx.cfg);
     let midi_activity3 = Arc::clone(&ctx.midi_activity);
+    let beat_rx3 = beat_rx.resubscribe();
     let timing_rx3 = timing_rx;
 
     let mtc_midi: Arc<dyn crate::midi::MidiTransport> = Arc::new(midi_out);
@@ -60,6 +61,7 @@ pub fn spawn(
         dj_state3,
         cfg3,
         midi_activity3,
+        beat_rx3,
         timing_rx3,
     ));
 }
