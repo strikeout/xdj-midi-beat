@@ -93,6 +93,7 @@ fn draw_header(
     let st = dj_state.read();
     let cfg_r = cfg.read();
     let master = &st.master;
+    let version = env!("CARGO_PKG_VERSION");
 
     let flash = tui.beat_flash_active();
     let bpm_color = if flash { CLR_BEAT_FLASH } else { CLR_ACCENT };
@@ -135,7 +136,7 @@ fn draw_header(
     // Row 1: title + source + mode + interface + state
     let row1 = Line::from(vec![
         Span::styled(
-            " xdj-clock ",
+            format!(" xdj-clock v{} ", version),
             Style::default().fg(CLR_ACCENT).add_modifier(Modifier::BOLD),
         ),
         Span::raw("│ "),
