@@ -519,6 +519,32 @@ fn full_frame_sysex(tc: &Timecode, rate: &MtcFrameRate) -> [u8; 10] {
     ]
 }
 
+fn maybe_mark_beat_driven_playing(
+    state: &SharedState,
+    clock_loop_enabled: bool,
+    beat_driven_playing: &mut bool,
+    evt: &BeatEvent,
+) {
+    if clock_loop_enabled {
+        return;
+    }
+
+    let BeatEvent::Beat { packet: bp, .. } = evt else {
+        return;
+    };
+
+    let master = state.read().master.clone();
+    if master.source == Some(BeatSource::AbletonLink) {
+        return;
+    }
+
+    let master_num = master.device_number;
+    let master_is_set = master_num > 0;
+    if !master_is_set || bp.device_number == master_num {
+        *beat_driven_playing = true;
+    }
+}
+
 // ── Main MTC task ─────────────────────────────────────────────────────────────
 
 pub async fn run(
@@ -559,17 +585,13 @@ pub async fn run(
                 tokio::select! {
                     _ = sleep_until(TokioInstant::from_std(t)) => {}
                     evt = beat_rx.recv() => {
-                        if let Ok(BeatEvent::Beat { packet: bp, .. }) = evt {
-                            if !clock_loop_enabled {
-                                let master = state.read().master.clone();
-                                if master.source != Some(BeatSource::AbletonLink) {
-                                    let master_num = master.device_number;
-                                    let master_is_set = master_num > 0;
-                                    if !master_is_set || bp.device_number == master_num {
-                                        beat_driven_playing = true;
-                                    }
-                                }
-                            }
+                        if let Ok(evt) = evt {
+                            maybe_mark_beat_driven_playing(
+                                &state,
+                                clock_loop_enabled,
+                                &mut beat_driven_playing,
+                                &evt,
+                            );
                         }
                     }
                     changed = timing_rx.changed() => {
@@ -583,17 +605,13 @@ pub async fn run(
                 tokio::select! {
                     _ = sleep(IDLE_POLL) => {}
                     evt = beat_rx.recv() => {
-                        if let Ok(BeatEvent::Beat { packet: bp, .. }) = evt {
-                            if !clock_loop_enabled {
-                                let master = state.read().master.clone();
-                                if master.source != Some(BeatSource::AbletonLink) {
-                                    let master_num = master.device_number;
-                                    let master_is_set = master_num > 0;
-                                    if !master_is_set || bp.device_number == master_num {
-                                        beat_driven_playing = true;
-                                    }
-                                }
-                            }
+                        if let Ok(evt) = evt {
+                            maybe_mark_beat_driven_playing(
+                                &state,
+                                clock_loop_enabled,
+                                &mut beat_driven_playing,
+                                &evt,
+                            );
                         }
                     }
                     changed = timing_rx.changed() => {

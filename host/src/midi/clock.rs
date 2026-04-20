@@ -561,6 +561,37 @@ fn handle_prolink_beat_loop_disabled(
     }
 }
 
+fn emit_overdue_clock_pulses(cs: &mut ClockState, midi: &Arc<dyn MidiTransport>) -> u64 {
+    if cs.interval_ns == 0 {
+        return 0;
+    }
+
+    let now = Instant::now();
+    let elapsed = now.duration_since(cs.last_pulse).as_nanos() as u64;
+    if elapsed < cs.interval_ns {
+        return 0;
+    }
+
+    let intervals_elapsed = (elapsed / cs.interval_ns).max(1);
+    cs.last_pulse += Duration::from_nanos(intervals_elapsed.saturating_mul(cs.interval_ns));
+    cs.pulse_index = (cs.pulse_index + intervals_elapsed) % PPQ;
+    for _ in 0..intervals_elapsed {
+        let _ = midi.send_message(&[MSG_CLOCK]);
+    }
+
+    if intervals_elapsed > 1 {
+        tracing::trace!(
+            target: "midi.clock",
+            intervals_elapsed,
+            elapsed_ns = elapsed,
+            interval_ns = cs.interval_ns,
+            "Clock late wake: skipped overdue pulse boundaries without bursting"
+        );
+    }
+
+    intervals_elapsed
+}
+
 // ── Main clock task ───────────────────────────────────────────────────────────
 
 pub async fn run(
@@ -770,36 +801,16 @@ pub async fn run(
 
         if clock_enabled && cs.running && pulse_bpm > 0.0 {
             cs.set_bpm(pulse_bpm);
-            let now = Instant::now();
-            let elapsed = now.duration_since(cs.last_pulse).as_nanos() as u64;
-            if elapsed >= cs.interval_ns {
-                let intervals_elapsed = (elapsed / cs.interval_ns).max(1);
-                cs.last_pulse += Duration::from_nanos(intervals_elapsed.saturating_mul(cs.interval_ns));
-                cs.pulse_index = (cs.pulse_index + intervals_elapsed) % PPQ;
-                for _ in 0..intervals_elapsed {
-                    let _ = midi.send_message(&[MSG_CLOCK]);
-                }
-
-                if intervals_elapsed > 1 {
-                    tracing::trace!(
-                        target: "midi.clock",
-                        intervals_elapsed,
-                        elapsed_ns = elapsed,
-                        interval_ns = cs.interval_ns,
-                        "Clock late wake: skipped overdue pulse boundaries without bursting"
-                    );
-                }
-
-                {
-                    if let Some(mut a) = activity.try_lock() {
-                        a.clock_pulses += intervals_elapsed;
-                        a.clock_last_pulse_at = Some(Instant::now());
-                        a.clock_running = cs.running;
-                        a.clock_waiting_for_phrase = cs.waiting_for_downbeat;
-                        a.clock_wait_beats_seen = cs.wait_beats_seen;
-                        a.clock_phrase_beat = cs.beat_count;
-                        a.clock_pulse_index = cs.pulse_index;
-                    }
+            let intervals_elapsed = emit_overdue_clock_pulses(&mut cs, &midi);
+            if intervals_elapsed > 0 {
+                if let Some(mut a) = activity.try_lock() {
+                    a.clock_pulses += intervals_elapsed;
+                    a.clock_last_pulse_at = Some(Instant::now());
+                    a.clock_running = cs.running;
+                    a.clock_waiting_for_phrase = cs.waiting_for_downbeat;
+                    a.clock_wait_beats_seen = cs.wait_beats_seen;
+                    a.clock_phrase_beat = cs.beat_count;
+                    a.clock_pulse_index = cs.pulse_index;
                 }
             }
         }
@@ -960,6 +971,26 @@ mod tests {
         assert_eq!(cs.wait_beats_seen, 0);
         assert_eq!(activity.lock().clock_phrase_beat, 0);
         assert!(activity.lock().clock_waiting_for_phrase);
+    }
+
+    #[test]
+    fn test_emit_overdue_clock_pulses_sends_each_elapsed_interval() {
+        let mut cs = ClockState::new();
+        cs.running = true;
+        cs.pulse_index = 22;
+        let overdue = Duration::from_nanos(cs.interval_ns.saturating_mul(3).saturating_add(1));
+        cs.last_pulse = Instant::now().checked_sub(overdue).unwrap_or(Instant::now());
+
+        let midi = Arc::new(MockMidiTransport::new());
+        let transport: Arc<dyn MidiTransport> = midi.clone();
+
+        let sent = emit_overdue_clock_pulses(&mut cs, &transport);
+
+        assert_eq!(sent, 3);
+        assert_eq!(cs.pulse_index, 1);
+        let msgs = midi.get_messages();
+        assert_eq!(msgs.len(), 3);
+        assert!(msgs.iter().all(|m| m.as_slice() == [MSG_CLOCK]));
     }
 
 }
