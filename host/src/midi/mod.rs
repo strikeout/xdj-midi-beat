@@ -1,5 +1,6 @@
 pub mod clock;
 pub mod mapper;
+pub mod soak;
 pub mod timecode;
 pub mod transport;
 
@@ -7,4 +8,7 @@ pub mod transport;
 mod test_utils;
 
 #[allow(unused_imports)]
-pub use transport::{MidiTransport, MidirTransport, MidiError};
+pub use transport::{
+    open_midi_output, MidiError, MidiOutConnection, MidiOutHandle, MidirOutConnection,
+    MidiTransport,
+};
