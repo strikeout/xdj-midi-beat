@@ -185,13 +185,14 @@ fn handle_beat_event(
             if !master_is_set || from_master {
                 cs.set_bpm(bp.effective_bpm);
                 {
-                    let mut a = activity.lock();
-                    a.clock_running = cs.running;
-                    a.clock_waiting_for_phrase = cs.waiting_for_downbeat;
-                    a.clock_wait_beats_seen = cs.wait_beats_seen;
-                    a.clock_phrase_beat = cs.beat_count;
-                    a.clock_pulse_index = cs.pulse_index;
-                    a.clock_timing_delta_ms = beat_timing_delta_ms(&cs, Instant::now());
+                    if let Some(mut a) = activity.try_lock() {
+                        a.clock_running = cs.running;
+                        a.clock_waiting_for_phrase = cs.waiting_for_downbeat;
+                        a.clock_wait_beats_seen = cs.wait_beats_seen;
+                        a.clock_phrase_beat = cs.beat_count;
+                        a.clock_pulse_index = cs.pulse_index;
+                        a.clock_timing_delta_ms = beat_timing_delta_ms(&cs, Instant::now());
+                    }
                 }
 
                 let phrase_beat = if master.phrase_16_beat > 0 {
@@ -212,14 +213,15 @@ fn handle_beat_event(
                         cs.has_started = true;
                         let _ = midi.send_message(&[MSG_START]);
                         {
-                            let mut a = activity.lock();
-                            a.clock_last_start_at = Some(Instant::now());
-                            a.clock_running = true;
-                            a.clock_waiting_for_phrase = false;
-                            a.clock_wait_beats_seen = 0;
-                            a.clock_phrase_beat = cs.beat_count;
-                            a.clock_pulse_index = cs.pulse_index;
-                            a.clock_timing_delta_ms = beat_timing_delta_ms(&cs, Instant::now());
+                            if let Some(mut a) = activity.try_lock() {
+                                a.clock_last_start_at = Some(Instant::now());
+                                a.clock_running = true;
+                                a.clock_waiting_for_phrase = false;
+                                a.clock_wait_beats_seen = 0;
+                                a.clock_phrase_beat = cs.beat_count;
+                                a.clock_pulse_index = cs.pulse_index;
+                                a.clock_timing_delta_ms = beat_timing_delta_ms(&cs, Instant::now());
+                            }
                         }
                         cs.pulse_index = 0;
                         cs.last_pulse = Instant::now();
@@ -255,13 +257,14 @@ fn handle_beat_event(
             cs.set_bpm(bpm);
 
             {
-                let mut a = activity.lock();
-                a.clock_running = cs.running;
-                a.clock_waiting_for_phrase = cs.waiting_for_downbeat;
-                a.clock_wait_beats_seen = cs.wait_beats_seen;
-                a.clock_phrase_beat = cs.beat_count;
-                a.clock_pulse_index = cs.pulse_index;
-                a.clock_timing_delta_ms = beat_timing_delta_ms(&cs, Instant::now());
+                if let Some(mut a) = activity.try_lock() {
+                    a.clock_running = cs.running;
+                    a.clock_waiting_for_phrase = cs.waiting_for_downbeat;
+                    a.clock_wait_beats_seen = cs.wait_beats_seen;
+                    a.clock_phrase_beat = cs.beat_count;
+                    a.clock_pulse_index = cs.pulse_index;
+                    a.clock_timing_delta_ms = beat_timing_delta_ms(&cs, Instant::now());
+                }
             }
 
             let master = state.read().master.clone();
@@ -283,14 +286,15 @@ fn handle_beat_event(
                     cs.has_started = true;
                     let _ = midi.send_message(&[MSG_START]);
                         {
-                            let mut a = activity.lock();
-                            a.clock_last_start_at = Some(Instant::now());
-                            a.clock_running = true;
-                            a.clock_waiting_for_phrase = false;
-                            a.clock_wait_beats_seen = 0;
-                            a.clock_phrase_beat = cs.beat_count;
-                            a.clock_pulse_index = cs.pulse_index;
-                            a.clock_timing_delta_ms = beat_timing_delta_ms(&cs, Instant::now());
+                            if let Some(mut a) = activity.try_lock() {
+                                a.clock_last_start_at = Some(Instant::now());
+                                a.clock_running = true;
+                                a.clock_waiting_for_phrase = false;
+                                a.clock_wait_beats_seen = 0;
+                                a.clock_phrase_beat = cs.beat_count;
+                                a.clock_pulse_index = cs.pulse_index;
+                                a.clock_timing_delta_ms = beat_timing_delta_ms(&cs, Instant::now());
+                            }
                         }
                     cs.pulse_index = 0;
                     cs.last_pulse = Instant::now();
@@ -334,12 +338,13 @@ fn handle_master_change(
     cs.beat_count = 0;
     cs.arm_wait_for_phrase_start();
 
-    let mut a = activity.lock();
-    a.clock_running = false;
-    a.clock_waiting_for_phrase = true;
-    a.clock_wait_beats_seen = 0;
-    a.clock_phrase_beat = 0;
-    a.clock_pulse_index = 0;
+    if let Some(mut a) = activity.try_lock() {
+        a.clock_running = false;
+        a.clock_waiting_for_phrase = true;
+        a.clock_wait_beats_seen = 0;
+        a.clock_phrase_beat = 0;
+        a.clock_pulse_index = 0;
+    }
 }
 
 // ── Main clock task ───────────────────────────────────────────────────────────
@@ -354,10 +359,17 @@ pub async fn run(
 ) {
     let mut cs = ClockState::new();
     let mut clock_enabled = cfg.read().midi.clock_enabled;
+    let mut cached_bpm = 0.0;
+    let mut cached_is_playing = false;
     let mut last_master_key = {
         let st = state.read();
         (st.master.source.clone(), st.master.device_number)
     };
+
+    if let Some(st) = state.try_read() {
+        cached_bpm = st.master.bpm;
+        cached_is_playing = st.master.is_playing;
+    }
 
     tracing::info!("MIDI clock task started");
     if !clock_enabled {
@@ -450,10 +462,11 @@ pub async fn run(
         }
 
         // ── Read master state ────────────────────────────────────────────────
-        let (bpm, is_playing) = {
-            let st = state.read();
-            (st.master.bpm, st.master.is_playing)
-        };
+        if let Some(st) = state.try_read() {
+            cached_bpm = st.master.bpm;
+            cached_is_playing = st.master.is_playing;
+        }
+        let (bpm, is_playing) = (cached_bpm, cached_is_playing);
 
         // ── Start / Stop / Continue messages ─────────────────────────────────
         if clock_enabled && is_playing && !cs.running && !cs.waiting_for_downbeat {
@@ -470,16 +483,17 @@ pub async fn run(
             let _ = midi.send_message(&[msg]);
             let _ = midi.send_message(&[MSG_CLOCK]);
             {
-                let mut a = activity.lock();
-                a.clock_pulses += 1;
-                a.clock_last_pulse_at = Some(Instant::now());
-                a.clock_running = cs.running;
-                a.clock_waiting_for_phrase = cs.waiting_for_downbeat;
-                a.clock_wait_beats_seen = cs.wait_beats_seen;
-                a.clock_phrase_beat = cs.beat_count;
-                a.clock_pulse_index = cs.pulse_index;
-                if msg == MSG_START {
-                    a.clock_last_start_at = Some(Instant::now());
+                if let Some(mut a) = activity.try_lock() {
+                    a.clock_pulses += 1;
+                    a.clock_last_pulse_at = Some(Instant::now());
+                    a.clock_running = cs.running;
+                    a.clock_waiting_for_phrase = cs.waiting_for_downbeat;
+                    a.clock_wait_beats_seen = cs.wait_beats_seen;
+                    a.clock_phrase_beat = cs.beat_count;
+                    a.clock_pulse_index = cs.pulse_index;
+                    if msg == MSG_START {
+                        a.clock_last_start_at = Some(Instant::now());
+                    }
                 }
             }
             tracing::debug!(msg = if msg == MSG_START { "Start" } else { "Continue" }, "MIDI transport sent");
@@ -500,14 +514,15 @@ pub async fn run(
                 cs.pulse_index = (cs.pulse_index + 1) % PPQ;
                 let _ = midi.send_message(&[MSG_CLOCK]);
                 {
-                    let mut a = activity.lock();
-                    a.clock_pulses += 1;
-                    a.clock_last_pulse_at = Some(Instant::now());
-                    a.clock_running = cs.running;
-                    a.clock_waiting_for_phrase = cs.waiting_for_downbeat;
-                    a.clock_wait_beats_seen = cs.wait_beats_seen;
-                    a.clock_phrase_beat = cs.beat_count;
-                    a.clock_pulse_index = cs.pulse_index;
+                    if let Some(mut a) = activity.try_lock() {
+                        a.clock_pulses += 1;
+                        a.clock_last_pulse_at = Some(Instant::now());
+                        a.clock_running = cs.running;
+                        a.clock_waiting_for_phrase = cs.waiting_for_downbeat;
+                        a.clock_wait_beats_seen = cs.wait_beats_seen;
+                        a.clock_phrase_beat = cs.beat_count;
+                        a.clock_pulse_index = cs.pulse_index;
+                    }
                 }
             }
         }
