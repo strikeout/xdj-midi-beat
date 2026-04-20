@@ -2,6 +2,24 @@ use std::time::{Duration, Instant};
 
 use crate::prolink::packets::{AbsPositionPacket, BeatPacket};
 
+const PHASE_EPSILON: f64 = 1e-6;
+
+fn stable_unit_phase(v: f64) -> f64 {
+    if !v.is_finite() {
+        return 0.0;
+    }
+
+    let snapped = if v.abs() <= PHASE_EPSILON {
+        0.0
+    } else if (1.0 - v).abs() <= PHASE_EPSILON {
+        1.0
+    } else {
+        v
+    };
+
+    snapped.clamp(0.0, 1.0)
+}
+
 /// Minimal log throttler (no deps): allow at most one log per `interval`.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct LogThrottle {
@@ -88,9 +106,11 @@ impl TimingMeasurement {
         let bpm = packet.track_bpm.unwrap_or(effective_bpm);
 
         let beat_phase = if effective_bpm > 0.0 {
-            let beat_dur_ms = 60_000.0 / effective_bpm;
-            let time_into_beat = (beat_dur_ms - packet.next_beat_ms as f64).clamp(0.0, beat_dur_ms);
-            Some((time_into_beat / beat_dur_ms).clamp(0.0, 1.0))
+            let inv_beat_dur = effective_bpm / 60_000.0;
+            // Equivalent to (beat_dur_ms - next_beat_ms) / beat_dur_ms, but avoids
+            // subtracting similarly-sized values before normalization.
+            let raw_phase = 1.0 - ((packet.next_beat_ms as f64) * inv_beat_dur);
+            Some(stable_unit_phase(raw_phase))
         } else {
             None
         };
@@ -98,7 +118,7 @@ impl TimingMeasurement {
         let bar_phase = match (packet.beat_in_bar, beat_phase) {
             (b, Some(bp)) if b >= 1 => {
                 // Normalize within a 4/4 bar.
-                Some(((((b - 1) as f64) + bp) / 4.0).clamp(0.0, 1.0))
+                Some(stable_unit_phase((((b - 1) as f64) + bp) * 0.25))
             }
             _ => None,
         };
@@ -124,8 +144,9 @@ impl TimingMeasurement {
 
         let beat_phase = if effective_bpm > 0.0 {
             let beat_dur_ms = 60_000.0 / effective_bpm;
-            let within = (packet.playhead_ms as f64) % beat_dur_ms;
-            Some((within / beat_dur_ms).clamp(0.0, 1.0))
+            let inv_beat_dur = effective_bpm / 60_000.0;
+            let within = (packet.playhead_ms as f64).rem_euclid(beat_dur_ms);
+            Some(stable_unit_phase(within * inv_beat_dur))
         } else {
             None
         };
@@ -165,8 +186,8 @@ impl TimingMeasurement {
             },
             bpm,
             effective_bpm: bpm,
-            beat_phase: Some(beat_phase.clamp(0.0, 1.0)),
-            bar_phase: Some(bar_phase.clamp(0.0, 1.0)),
+            beat_phase: Some(stable_unit_phase(beat_phase)),
+            bar_phase: Some(stable_unit_phase(bar_phase)),
             beat_in_bar: Some(beat_in_bar),
             playhead_ms: None,
         }
