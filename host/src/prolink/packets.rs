@@ -3,8 +3,8 @@
 use std::fmt;
 
 use super::{
-    bpm_from_raw, effective_bpm, pitch_to_percent, scale_nominal_beat_ms, MAGIC, PKT_ABS_POSITION, PKT_BEAT,
-    PKT_CDJ_STATUS, PKT_KEEPALIVE, PKT_MIXER_STATUS,
+    bpm_from_raw, effective_bpm, pitch_to_percent, scale_nominal_beat_ms, MAGIC, PKT_ABS_POSITION,
+    PKT_BEAT, PKT_CDJ_STATUS, PKT_KEEPALIVE, PKT_MIXER_STATUS,
 };
 
 pub(crate) const CDJ_STATUS_PACKET_LEN: usize = 0xd4;
