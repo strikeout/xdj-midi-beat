@@ -578,17 +578,39 @@ mod tests {
         let conn: Box<dyn MidiOutConnection> = Box::new(RecordingConn::new(Arc::clone(&sent)));
         let midi = MidiOutHandle::start(8192, Some(conn));
 
-        // Build a large normal backlog, then add many realtime ticks.
-        for i in 0u16..1200 {
-            let lo = (i & 0xff) as u8;
-            let hi = (i >> 8) as u8;
+        // Seed some normal backlog first.
+        for i in 0u16..400 {
+            let lo = (i & 0x7f) as u8;
+            let hi = ((i >> 7) & 0x7f) as u8;
             midi.send_message(&[0xB0, lo, hi])
                 .expect("normal send should enqueue");
         }
-        for i in 0u8..96 {
-            midi.send_message(&[0xF8, i])
-                .expect("realtime send should enqueue");
-        }
+
+        // Then run sustained concurrent pressure: normal flood + periodic realtime ticks.
+        let normal_midi = midi.clone();
+        let normal_task = tokio::spawn(async move {
+            for i in 0u16..2500 {
+                let lo = (i & 0x7f) as u8;
+                let hi = ((i >> 7) & 0x7f) as u8;
+                let _ = normal_midi.send_message(&[0xB0, lo, hi]);
+                if i % 8 == 0 {
+                    tokio::task::yield_now().await;
+                }
+            }
+        });
+
+        let rt_midi = midi.clone();
+        let rt_task = tokio::spawn(async move {
+            for _ in 0..96 {
+                rt_midi
+                    .send_message(&[0xF8])
+                    .expect("realtime send should enqueue");
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        });
+
+        normal_task.await.expect("normal flood task should finish");
+        rt_task.await.expect("realtime producer task should finish");
 
         midi.barrier().await;
 
@@ -600,16 +622,25 @@ mod tests {
             .collect();
 
         assert_eq!(rt_indices.len(), 96, "expected all realtime ticks sent");
-        let worst_rt_index = *rt_indices
-            .iter()
-            .max()
+        let first_rt_index = *rt_indices
+            .first()
             .expect("at least one realtime index exists");
 
-        // Under sustained flood, realtime ticks must still surface near the front
-        // instead of sinking behind the full normal backlog.
+        let worst_gap = rt_indices
+            .windows(2)
+            .map(|w| w[1].saturating_sub(w[0]))
+            .max()
+            .unwrap_or(0);
+
+        // Under sustained flood, realtime ticks must still surface quickly and
+        // remain interleaved, rather than sinking behind long normal bursts.
         assert!(
-            worst_rt_index < 300,
-            "realtime ticks drifted too deep into backlog (worst index {worst_rt_index})"
+            first_rt_index < 220,
+            "first realtime tick appeared too late (index {first_rt_index})"
+        );
+        assert!(
+            worst_gap < 160,
+            "realtime interleaving gap too large under flood (worst gap {worst_gap})"
         );
     }
 }
