@@ -118,17 +118,29 @@ mod tests {
         fire_beat_notes(&midi, &note_cfg, 2, &activity);
         let msgs = midi.get_messages();
         assert_eq!(msgs.len(), 2);
-        assert_eq!(msgs[0], note_on(note_cfg.channel, note_cfg.beat, 80).to_vec());
+        assert_eq!(
+            msgs[0],
+            note_on(note_cfg.channel, note_cfg.beat, 80).to_vec()
+        );
         assert_eq!(msgs[1], note_off(note_cfg.channel, note_cfg.beat).to_vec());
 
         midi.clear_messages();
         fire_beat_notes(&midi, &note_cfg, 1, &activity);
         let msgs = midi.get_messages();
         assert_eq!(msgs.len(), 4);
-        assert_eq!(msgs[0], note_on(note_cfg.channel, note_cfg.beat, 127).to_vec());
+        assert_eq!(
+            msgs[0],
+            note_on(note_cfg.channel, note_cfg.beat, 127).to_vec()
+        );
         assert_eq!(msgs[1], note_off(note_cfg.channel, note_cfg.beat).to_vec());
-        assert_eq!(msgs[2], note_on(note_cfg.channel, note_cfg.downbeat, 127).to_vec());
-        assert_eq!(msgs[3], note_off(note_cfg.channel, note_cfg.downbeat).to_vec());
+        assert_eq!(
+            msgs[2],
+            note_on(note_cfg.channel, note_cfg.downbeat, 127).to_vec()
+        );
+        assert_eq!(
+            msgs[3],
+            note_off(note_cfg.channel, note_cfg.downbeat).to_vec()
+        );
     }
 
     #[tokio::test]
@@ -216,7 +228,9 @@ mod tests {
             beat_in_bar: 1,
         }));
         tokio::time::sleep(Duration::from_millis(30)).await;
-        assert!(midi.get_messages().contains(&cc(0, 2, pitch_cc(0.0)).to_vec()));
+        assert!(midi
+            .get_messages()
+            .contains(&cc(0, 2, pitch_cc(0.0)).to_vec()));
 
         midi.clear_messages();
         {
@@ -233,7 +247,9 @@ mod tests {
             beat_in_bar: 1,
         }));
         tokio::time::sleep(Duration::from_millis(30)).await;
-        assert!(midi.get_messages().contains(&cc(2, 12, pitch_cc(5.0)).to_vec()));
+        assert!(midi
+            .get_messages()
+            .contains(&cc(2, 12, pitch_cc(5.0)).to_vec()));
 
         handle.abort();
     }
@@ -368,13 +384,33 @@ async fn run_with_midi(
             };
         }
 
-        send_cc_if_changed!(prev.bpm_coarse, new_bpm_coarse, cc_cfg.bpm_coarse, cc_cfg.channel);
+        send_cc_if_changed!(
+            prev.bpm_coarse,
+            new_bpm_coarse,
+            cc_cfg.bpm_coarse,
+            cc_cfg.channel
+        );
         send_cc_if_changed!(prev.bpm_fine, new_bpm_fine, cc_cfg.bpm_fine, cc_cfg.channel);
         send_cc_if_changed!(prev.pitch, new_pitch, cc_cfg.pitch, cc_cfg.channel);
-        send_cc_if_changed!(prev.bar_phase, new_bar_phase, cc_cfg.bar_phase, cc_cfg.channel);
-        send_cc_if_changed!(prev.beat_phase, new_beat_phase, cc_cfg.beat_phase, cc_cfg.channel);
+        send_cc_if_changed!(
+            prev.bar_phase,
+            new_bar_phase,
+            cc_cfg.bar_phase,
+            cc_cfg.channel
+        );
+        send_cc_if_changed!(
+            prev.beat_phase,
+            new_beat_phase,
+            cc_cfg.beat_phase,
+            cc_cfg.channel
+        );
         send_cc_if_changed!(prev.playing, new_playing, cc_cfg.playing, cc_cfg.channel);
-        send_cc_if_changed!(prev.master_deck, new_master_deck, cc_cfg.master_deck, cc_cfg.channel);
+        send_cc_if_changed!(
+            prev.master_deck,
+            new_master_deck,
+            cc_cfg.master_deck,
+            cc_cfg.channel
+        );
 
         if master.phrase_16_beat == 0 && prev_phrase_16_beat != 0 {
             let new_phrase_16 = 0u8;
@@ -404,7 +440,10 @@ async fn run_with_midi(
                 let mut act = activity.lock();
                 act.notes_sent += 1;
                 act.last_note = Some((note_cfg.phrase_change, Instant::now()));
-                tracing::debug!(note = note_cfg.phrase_change, "Phrase change MIDI note fired");
+                tracing::debug!(
+                    note = note_cfg.phrase_change,
+                    "Phrase change MIDI note fired"
+                );
             }
             prev_phrase_idx = cur_phrase;
         }

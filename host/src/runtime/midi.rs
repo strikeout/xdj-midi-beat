@@ -46,7 +46,8 @@ pub fn spawn(
             midi_activity2,
             cfg_change_rx,
             timing_rx2,
-        ).await;
+        )
+        .await;
     });
 
     let dj_state3 = Arc::clone(&ctx.dj_state);
@@ -74,8 +75,8 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use crate::config::{new_shared, Config};
-    use crate::state::{new_shared as new_shared_state, BeatSource, MasterState, TrackChange};
     use crate::state::timing::TimingMeasurement;
+    use crate::state::{new_shared as new_shared_state, BeatSource, MasterState, TrackChange};
     use crate::tui::state::MidiActivity;
 
     #[tokio::test]
@@ -89,23 +90,29 @@ mod tests {
         {
             let mut st = state.write();
             st.master = MasterState {
-            source: Some(BeatSource::AbletonLink),
-            bpm: 120.0,
-            is_playing: true,
-            ..Default::default()
+                source: Some(BeatSource::AbletonLink),
+                bpm: 120.0,
+                is_playing: true,
+                ..Default::default()
             };
             // MTC now derives its position from the authoritative timing model.
-            st.timing
-                .observe(TimingMeasurement::from_link(120.0, 1, 0.0, 0.0, true, Instant::now()));
+            st.timing.observe(TimingMeasurement::from_link(
+                120.0,
+                1,
+                0.0,
+                0.0,
+                true,
+                Instant::now(),
+            ));
         }
 
-    let (beat_tx, beat_rx) = broadcast::channel(8);
-    let (status_tx, status_rx) = broadcast::channel(8);
-    let (device_tx, _) = broadcast::channel(8);
-    let (vcdjready_tx, _) = broadcast::channel(8);
-    let (track_change_tx, _track_change_rx) = tokio::sync::mpsc::channel::<TrackChange>(8);
-    let (_cfg_change_tx, cfg_change_rx) = watch::channel(());
-    let (timing_tx, timing_rx) = watch::channel(());
+        let (beat_tx, beat_rx) = broadcast::channel(8);
+        let (status_tx, status_rx) = broadcast::channel(8);
+        let (device_tx, _) = broadcast::channel(8);
+        let (vcdjready_tx, _) = broadcast::channel(8);
+        let (track_change_tx, _track_change_rx) = tokio::sync::mpsc::channel::<TrackChange>(8);
+        let (_cfg_change_tx, cfg_change_rx) = watch::channel(());
+        let (timing_tx, timing_rx) = watch::channel(());
 
         let midi_activity = Arc::new(ParkingMutex::new(MidiActivity::default()));
         let midi_out = crate::midi::MidiOutHandle::start(64, None);
@@ -122,7 +129,7 @@ mod tests {
             track_change_tx,
         };
 
-    spawn(ctx, beat_rx, status_rx, cfg_change_rx, timing_rx);
+        spawn(ctx, beat_rx, status_rx, cfg_change_rx, timing_rx);
 
         tokio::time::sleep(Duration::from_millis(80)).await;
         assert_eq!(midi_activity.lock().mtc_quarter_frames, 0);

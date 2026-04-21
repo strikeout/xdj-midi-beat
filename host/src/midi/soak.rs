@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use clap::ValueEnum;
 
 use crate::config::MtcFrameRate;
-use crate::midi::{open_midi_output, MidiOutHandle, MidirOutConnection, MidiTransport};
+use crate::midi::{open_midi_output, MidiOutHandle, MidiTransport, MidirOutConnection};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum SoakMode {
@@ -168,8 +168,7 @@ const MTC_MAX_RESYNC_COUNT_THRESHOLD: u64 = 1;
 
 pub async fn run(args: SoakArgs) -> anyhow::Result<i32> {
     let conn = open_midi_output(&args.midi_out)?;
-    let initial_conn: Box<dyn crate::midi::MidiOutConnection> =
-        Box::new(MidirOutConnection(conn));
+    let initial_conn: Box<dyn crate::midi::MidiOutConnection> = Box::new(MidirOutConnection(conn));
     let midi_out = MidiOutHandle::start(4096, Some(initial_conn));
 
     let exit_code = match args.mode {
@@ -259,7 +258,8 @@ async fn run_mtc_soak(midi: &MidiOutHandle, args: &SoakArgs) -> anyhow::Result<i
     }
 
     let mut qf_sent: u64 = 0;
-    let mut samples_ms: Vec<f64> = Vec::with_capacity(expected_quarter_frames.min(200_000) as usize);
+    let mut samples_ms: Vec<f64> =
+        Vec::with_capacity(expected_quarter_frames.min(200_000) as usize);
 
     let mut n: u64 = 0;
     while Instant::now() < end && n < expected_quarter_frames {

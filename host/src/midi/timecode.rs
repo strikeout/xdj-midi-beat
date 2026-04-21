@@ -39,8 +39,8 @@ use tokio::sync::watch;
 use crate::config::{MtcFrameRate, SharedConfig};
 use crate::midi::MidiTransport;
 use crate::prolink::beat_listener::BeatEvent;
+use crate::state::timing::{MeasurementKind, TimingMeasurement, TimingSnapshot, TimingSource};
 use crate::state::{BeatSource, SharedState};
-use crate::state::timing::{MeasurementKind, TimingSnapshot};
 use crate::tui::state::MidiActivity;
 
 use tokio::time::{sleep, sleep_until, Instant as TokioInstant};
@@ -154,7 +154,12 @@ fn qf_interval(frame_rate: MtcFrameRate) -> Duration {
     Duration::from_secs_f64(1.0 / (fps * 4.0))
 }
 
-fn is_playing_like(now: Instant, bpm: f64, is_playing: bool, last_beat_at: Option<Instant>) -> bool {
+fn is_playing_like(
+    now: Instant,
+    bpm: f64,
+    is_playing: bool,
+    last_beat_at: Option<Instant>,
+) -> bool {
     if !(bpm.is_finite() && bpm > 0.0) {
         return false;
     }
@@ -164,15 +169,28 @@ fn is_playing_like(now: Instant, bpm: f64, is_playing: bool, last_beat_at: Optio
     let Some(t) = last_beat_at else {
         return false;
     };
-    now.checked_duration_since(t)
-        .unwrap_or(Duration::ZERO)
-        <= RECENT_BEAT_GRACE
+    now.checked_duration_since(t).unwrap_or(Duration::ZERO) <= RECENT_BEAT_GRACE
 }
 
 fn speed_factor_from_master_pitch_pct(pitch_pct: f64) -> f64 {
     // Master pitch is the only master-scoped speed indicator available across
     // sources. Clamp to a sane range.
     (1.0 + (pitch_pct / 100.0)).clamp(0.5, 2.0)
+}
+
+fn measurement_matches_master(
+    master_source: Option<BeatSource>,
+    master_device_number: u8,
+    measurement: &TimingMeasurement,
+) -> bool {
+    match measurement.source {
+        TimingSource::AbletonLink => master_source == Some(BeatSource::AbletonLink),
+        TimingSource::ProLink => {
+            master_source != Some(BeatSource::AbletonLink)
+                && (master_device_number == 0
+                    || measurement.device_number == Some(master_device_number))
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -312,6 +330,7 @@ impl MtcScheduler {
     fn derive_position_ms(
         &mut self,
         now: Instant,
+        master_source: Option<BeatSource>,
         master_device: u8,
         master_pitch_pct: f64,
         snapshot: &TimingSnapshot,
@@ -319,6 +338,10 @@ impl MtcScheduler {
         let TimingSnapshot::Fresh { measurement, age } = snapshot else {
             return None;
         };
+
+        if !measurement_matches_master(master_source, master_device, measurement) {
+            return None;
+        }
 
         // Preferred: fresh, master-scoped AbsPosition measurement.
         let is_master_scoped = measurement.device_number == Some(master_device);
@@ -337,8 +360,7 @@ impl MtcScheduler {
             return Some((pos, true));
         }
 
-        // Fallback: monotonic oscillator based on the last fresh timing snapshot.
-        let _ = measurement;
+        // Fallback: monotonic oscillator based on the last master-scoped timing snapshot.
         let speed = speed_factor_from_master_pitch_pct(master_pitch_pct);
         match &mut self.osc {
             Some(osc) => osc.update_speed_preserving_phase(now, speed),
@@ -354,6 +376,7 @@ impl MtcScheduler {
         now: Instant,
         enabled: bool,
         frame_rate: MtcFrameRate,
+        master_source: Option<BeatSource>,
         master_device: u8,
         master_bpm: f64,
         master_pitch_pct: f64,
@@ -385,9 +408,9 @@ impl MtcScheduler {
             return out;
         }
 
-        let playing_like = self
-            .playing_like_override
-            .unwrap_or_else(|| is_playing_like(now, master_bpm, master_is_playing, master_last_beat_at));
+        let playing_like = self.playing_like_override.unwrap_or_else(|| {
+            is_playing_like(now, master_bpm, master_is_playing, master_last_beat_at)
+        });
 
         // Stop when transport is not playing-like.
         match self.playing_like_state(playing_like) {
@@ -405,9 +428,13 @@ impl MtcScheduler {
 
         // If we just transitioned into playing-like, emit a full-frame and start QFs.
         if playing_like && !self.last_playing_like {
-            let Some((pos_ms, _auth)) =
-                self.derive_position_ms(now, master_device, master_pitch_pct, &snapshot)
-            else {
+            let Some((pos_ms, _auth)) = self.derive_position_ms(
+                now,
+                master_source,
+                master_device,
+                master_pitch_pct,
+                &snapshot,
+            ) else {
                 self.last_playing_like = playing_like;
                 return out;
             };
@@ -450,18 +477,28 @@ impl MtcScheduler {
             return out;
         }
 
-        let lateness = now.checked_duration_since(deadline).unwrap_or(Duration::ZERO);
+        let lateness = now
+            .checked_duration_since(deadline)
+            .unwrap_or(Duration::ZERO);
         self.stats.observe_lateness(lateness);
 
         let nominal_next = deadline + interval;
-        let next = if now >= nominal_next { now + interval } else { nominal_next };
+        let next = if now >= nominal_next {
+            now + interval
+        } else {
+            nominal_next
+        };
         self.next_qf_deadline = Some(next);
 
         // At the start of each 8-QF cycle, derive the timecode for this cycle.
         if self.qf_index == 0 {
-            let Some((pos_ms, _auth)) =
-                self.derive_position_ms(now, master_device, master_pitch_pct, &snapshot)
-            else {
+            let Some((pos_ms, _auth)) = self.derive_position_ms(
+                now,
+                master_source,
+                master_device,
+                master_pitch_pct,
+                &snapshot,
+            ) else {
                 // No fresh timing -> pause and wait.
                 self.running = false;
                 self.next_qf_deadline = None;
@@ -472,7 +509,11 @@ impl MtcScheduler {
             let frame = tc.total_frames(frame_rate.fps());
 
             if let Some(prev) = self.last_cycle_frame {
-                let diff = if frame >= prev { frame - prev } else { prev - frame };
+                let diff = if frame >= prev {
+                    frame - prev
+                } else {
+                    prev - frame
+                };
                 if diff > DISCONTINUITY_THRESHOLD_FRAMES {
                     // Exactly one full-frame resync, then restart QF cycle.
                     out.push(MtcOut::FullFrame(full_frame_sysex(&tc, &frame_rate)));
@@ -672,6 +713,7 @@ pub async fn run(
         }
 
         let (
+            master_source,
             master_device,
             master_bpm,
             master_pitch_pct,
@@ -681,6 +723,7 @@ pub async fn run(
         ) = {
             let st = state.read();
             (
+                st.master.source,
                 st.master.device_number,
                 st.master.bpm,
                 st.master.pitch_pct,
@@ -694,6 +737,7 @@ pub async fn run(
             now_std,
             enabled,
             frame_rate,
+            master_source,
             master_device,
             master_bpm,
             master_pitch_pct,
@@ -826,6 +870,7 @@ mod tests {
             base,
             true,
             MtcFrameRate::Fps25,
+            Some(BeatSource::AbletonLink),
             0,
             120.0,
             0.0,
@@ -845,6 +890,7 @@ mod tests {
                 now,
                 true,
                 MtcFrameRate::Fps25,
+                Some(BeatSource::AbletonLink),
                 0,
                 120.0,
                 0.0,
@@ -854,7 +900,9 @@ mod tests {
             );
             // Exactly one quarter-frame per wake.
             assert_eq!(
-                out.iter().filter(|m| matches!(m, MtcOut::QuarterFrame(_))).count(),
+                out.iter()
+                    .filter(|m| matches!(m, MtcOut::QuarterFrame(_)))
+                    .count(),
                 1
             );
 
@@ -869,6 +917,7 @@ mod tests {
             late,
             true,
             MtcFrameRate::Fps25,
+            Some(BeatSource::AbletonLink),
             0,
             120.0,
             0.0,
@@ -912,6 +961,7 @@ mod tests {
             base,
             true,
             MtcFrameRate::Fps30,
+            Some(BeatSource::ProLink),
             1,
             128.0,
             0.0,
@@ -934,6 +984,7 @@ mod tests {
                 t,
                 true,
                 MtcFrameRate::Fps30,
+                Some(BeatSource::ProLink),
                 1,
                 128.0,
                 0.0,
@@ -962,6 +1013,7 @@ mod tests {
             cycle_start,
             true,
             MtcFrameRate::Fps30,
+            Some(BeatSource::ProLink),
             1,
             128.0,
             0.0,
@@ -970,7 +1022,10 @@ mod tests {
             timing.snapshot_at(cycle_start),
         );
         assert_eq!(
-            out_seek.iter().filter(|m| matches!(m, MtcOut::FullFrame(_))).count(),
+            out_seek
+                .iter()
+                .filter(|m| matches!(m, MtcOut::FullFrame(_)))
+                .count(),
             1
         );
 
@@ -980,6 +1035,7 @@ mod tests {
             after,
             true,
             MtcFrameRate::Fps30,
+            Some(BeatSource::ProLink),
             1,
             128.0,
             0.0,
@@ -1016,6 +1072,7 @@ mod tests {
             base,
             true,
             MtcFrameRate::Fps25,
+            Some(BeatSource::AbletonLink),
             0,
             120.0,
             0.0,
@@ -1044,6 +1101,7 @@ mod tests {
             base,
             true,
             frame_rate,
+            Some(BeatSource::AbletonLink),
             0,
             120.0,
             0.0,
@@ -1060,6 +1118,7 @@ mod tests {
                 now,
                 true,
                 frame_rate,
+                Some(BeatSource::AbletonLink),
                 0,
                 120.0,
                 0.0,
@@ -1068,7 +1127,9 @@ mod tests {
                 timing.snapshot_at(now),
             );
             assert_eq!(
-                out.iter().filter(|m| matches!(m, MtcOut::QuarterFrame(_))).count(),
+                out.iter()
+                    .filter(|m| matches!(m, MtcOut::QuarterFrame(_)))
+                    .count(),
                 1
             );
             now = sched.next_wake().unwrap();
@@ -1081,6 +1142,7 @@ mod tests {
             stale_now,
             true,
             frame_rate,
+            Some(BeatSource::AbletonLink),
             0,
             120.0,
             0.0,
@@ -1097,6 +1159,7 @@ mod tests {
             stop_now,
             true,
             frame_rate,
+            Some(BeatSource::AbletonLink),
             0,
             120.0,
             0.0,
@@ -1108,11 +1171,14 @@ mod tests {
 
         // Fresh timing returns with a recent beat -> transition back to playing-like should restart output.
         let resume_now = stop_now + Duration::from_millis(1);
-        timing.observe(TimingMeasurement::from_link(120.0, 1, 0.0, 0.0, true, resume_now));
+        timing.observe(TimingMeasurement::from_link(
+            120.0, 1, 0.0, 0.0, true, resume_now,
+        ));
         let out_resume = sched.on_wake(
             resume_now,
             true,
             frame_rate,
+            Some(BeatSource::AbletonLink),
             0,
             120.0,
             0.0,
@@ -1121,7 +1187,9 @@ mod tests {
             timing.snapshot_at(resume_now),
         );
         assert!(out_resume.iter().any(|m| matches!(m, MtcOut::FullFrame(_))));
-        assert!(out_resume.iter().any(|m| matches!(m, MtcOut::QuarterFrame(_))));
+        assert!(out_resume
+            .iter()
+            .any(|m| matches!(m, MtcOut::QuarterFrame(_))));
         assert_eq!(
             out_resume
                 .iter()
@@ -1129,5 +1197,41 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn scheduler_ignores_fresh_non_master_timing() {
+        let base = Instant::now();
+        let mut timing = TimingModel::default();
+        timing.observe(TimingMeasurement {
+            received_at: base,
+            source: TimingSource::ProLink,
+            kind: MeasurementKind::ProLinkAbsPositionPacket,
+            device_number: Some(2),
+            playing: PlayingState::Unknown,
+            bpm: 128.0,
+            effective_bpm: 128.0,
+            beat_phase: None,
+            bar_phase: None,
+            beat_in_bar: None,
+            playhead_ms: Some(5_000),
+        });
+
+        let mut sched = MtcScheduler::new(true, MtcFrameRate::Fps25);
+        let out = sched.on_wake(
+            base,
+            true,
+            MtcFrameRate::Fps25,
+            Some(BeatSource::ProLink),
+            1,
+            128.0,
+            0.0,
+            true,
+            Some(base),
+            timing.snapshot_at(base),
+        );
+
+        assert!(out.is_empty());
+        assert_eq!(sched.next_wake(), None);
     }
 }
