@@ -41,7 +41,7 @@ fn scroll_offset(cursor: usize, visible: usize, total: usize) -> usize {
 //  │  Deck Information (top-left)   │  Output Status (top-right)      │
 //  │  min 12 rows                   │  8 rows                         │
 //  ├────────────────────────────────┼────────────────┬────────────────┤
-//  │  Input Config [1] (bot-left)   │ MIDI Config [2]│ Output Port [3]│
+//  │  Input Settings (bot-left)     │ MIDI Settings  │ Output Port    │
 //  │  7 rows (network/device)       │ 60% width      │ 40% width      │
 //  │                                │ min 10 rows    │                 │
 //  ├─────────────────────── Footer (8 rows) ───────────────────────────┤
@@ -225,11 +225,7 @@ fn draw_header(
 
             let label = format!(
                 "in {:02} b{}  out {:02}  Δ{}  {}",
-                in16,
-                master.beat_in_bar,
-                out16,
-                diff,
-                status
+                in16, master.beat_in_bar, out16, diff, status
             );
 
             f.render_widget(
@@ -278,7 +274,7 @@ fn draw_body(
 
     draw_output_status_panel(f, right[0], tui, cfg, dj_state);
 
-    // Bottom-right: MIDI Config [2] (left) + Output Port [3] (right), side by side
+    // Bottom-right: MIDI Settings (left) + Output Port (right), side by side
     let right_bottom = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
@@ -575,7 +571,7 @@ fn draw_input_config_panel(f: &mut Frame, area: Rect, tui: &TuiState, cfg: &Shar
         CLR_DIM
     };
     let block = Block::default()
-        .title(" Input Config [1] ")
+        .title(" Input Settings ")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(border_color));
     let inner = block.inner(area);
@@ -597,7 +593,7 @@ fn draw_midi_config_panel(f: &mut Frame, area: Rect, tui: &TuiState, cfg: &Share
         CLR_DIM
     };
     let block = Block::default()
-        .title(" MIDI Config [2] ")
+        .title(" MIDI Settings ")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(border_color));
     let inner = block.inner(area);
@@ -806,7 +802,7 @@ fn draw_output_config_panel(f: &mut Frame, area: Rect, tui: &TuiState) {
         CLR_DIM
     };
     let block = Block::default()
-        .title(" Output Port [3] ")
+        .title(" Output Port ")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(border_color));
     let inner = block.inner(area);
