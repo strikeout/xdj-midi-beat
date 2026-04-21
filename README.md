@@ -37,34 +37,6 @@
 ### Download the release
 1. download the latest release on the right
 2. run it.
----
-
-## Slow  Start 
-### Compile the Host (Desktop)
-1.  **Vendor Setup**: Ableton Link support requires vendoring `rusty_link`.
-    ```sh
-    mkdir -p vendor
-    curl -sL https://crates.io/api/v1/crates/rusty_link/0.2.3/download | tar xzf - -C vendor
-    mv vendor/rusty_link-0.2.3 vendor/rusty_link
-    cp .github/vendor-patches/build.rs vendor/rusty_link/build.rs
-    cp .github/vendor-patches/link_bindings.rs vendor/rusty_link/link_bindings.rs
-    ```
-2.  **Run**:
-    ```sh
-    cargo run -p xdj-clock-host
-    ```
-
-### Building the ESP32 Firmware
-```sh
-. /path/to/esp-idf/export.sh
-cargo build --release -p xdj-clock-esp32
-```
-
-### Running the Emulator
-```sh
-cargo run -p xdj-clock-esp32-emulator
-```
-Open `http://localhost:8080` to view the responsive WebSocket dashboard.
 
 ---
 
@@ -116,6 +88,41 @@ poll_interval_us = 500
 
 ---
 
+## Tested hardware
+
+Please help test the software on your decks.
+
+2024–2023
+- ⚪ OMNIS-DUO (2024)
+- ✅ XDJ-AZ (2024)
+- ⚪ OPUS-QUAD (2023)
+- ⚪ DJM-A9 (2023)
+2021–2020
+- ❌ XDJ-RX3 (2021, no PRO LINK)
+- ⚪ CDJ-3000 (2020)
+- ⚪ XDJ-XZ (2020)
+2019–2016
+- ❌ XDJ-RR (2019, no PRO LINK) 
+- ⚪ CDJ-TOUR1 (2016)
+- ⚪ CDJ-2000NXS2 (2016)
+- ⚪ DJM-900NXS2 (2016)
+- ❌ XDJ-RX2 (2017, no PRO LINK)
+- ⚪ XDJ-1000MK2 (2018)
+2015–2013
+- ⚪ XDJ-1000 (2015)
+- ⚪ XDJ-700 (2015)
+- ⚪ XDJ-RX (2015)
+- ⚪ CDJ-2000NXS (2013)
+- ⚪ CDJ-900NXS (2013)
+- ⚪ DJM-2000NXS (2013)
+- ⚪ DJM-900SRT (2013)
+2012–2009
+- ⚪ CDJ-2000 (2009)
+- ⚪ CDJ-900 (2009)
+- ⚪ DJM-2000 (2010)
+- ⚪ DJM-900NXS (2011)
+---
+
 ## 🏗 Architecture
 
 The project is a Rust workspace with shared core logic across desktop and embedded targets.
@@ -140,6 +147,35 @@ Core outputs:
 - **TOML config** — remappable MIDI channel, note, and CC numbers
 - **CLI overrides** — interface, MIDI port, source, device number, log level
 - **TUI** — live status, port selection, and logging via [ratatui](https://ratatui.rs)
+
+---
+
+## Slow  Start 
+### Compile the Host (Desktop)
+1.  **Vendor Setup**: Ableton Link support requires vendoring `rusty_link`.
+    ```sh
+    mkdir -p vendor
+    curl -sL https://crates.io/api/v1/crates/rusty_link/0.2.3/download | tar xzf - -C vendor
+    mv vendor/rusty_link-0.2.3 vendor/rusty_link
+    cp .github/vendor-patches/build.rs vendor/rusty_link/build.rs
+    cp .github/vendor-patches/link_bindings.rs vendor/rusty_link/link_bindings.rs
+    ```
+2.  **Run**:
+    ```sh
+    cargo run -p xdj-clock-host
+    ```
+
+### Building the ESP32 Firmware
+```sh
+. /path/to/esp-idf/export.sh
+cargo build --release -p xdj-clock-esp32
+```
+
+### Running the Emulator
+```sh
+cargo run -p xdj-clock-esp32-emulator
+```
+Open `http://localhost:8080` to view the responsive WebSocket dashboard.
 
 ---
 
