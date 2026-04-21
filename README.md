@@ -6,33 +6,6 @@ Bridge between Pioneer CDJ/XDJ hardware (Pro DJ Link) or rekordbox Performance m
 
 ---
 
-## 🏗 Architecture
-
-The project is structured as a Rust workspace with shared core logic to ensure consistency across desktop and embedded platforms.
-
-- **`host/`**: Shared core library and Desktop/Laptop application.
-  - **Shared Library**: Centralized Pro DJ Link packet parsing/building and global state management.
-  - **TUI Dashboard**: Real-time Terminal UI with device discovery, BPM status, and interactive MIDI port selection.
-  - **Ableton Link**: Integrated Link engine with hybrid "Auto" mode priority.
-- **`esp32/`**: Firmware for embedded ESP32 hardware.
-  - **WiFi AP**: Creates a dedicated `xdj-midi-setup` network.
-  - **GPIO MIDI**: Low-latency hardware MIDI IN/OUT via UART.
-- **`esp32-emulator/`**: High-performance native emulator of the ESP32 firmware.
-  - **Web Dashboard**: Modern, responsive CSS Grid interface with real-time WebSocket updates.
-  - **Verification Tools**: Built-in simulators for testing master handoff and stopped-deck scenarios.
-- **24-PPQ MIDI clock** — tight Start / Stop / Clock (0xF8) pulses derived from the DJ master tempo
-- **MIDI CC** — continuous BPM coarse/fine, pitch, bar phase, beat phase, playing state, master deck number
-- **MIDI notes** — beat trigger (every beat) and downbeat trigger (beat 1 of every bar), with velocity accents
-- **Two source modes:**
-  - 1. **Pro DJ Link** — listens on the Ethernet network for CDJ-3000 / XDJ-AZ / XDJ-XZ absolute-position packets (~30 ms) and beat packets; works with any Pioneer standalone hardware
-  - 2. **Ableton Link** — joins the Link session broadcast by rekordbox (Performance mode / USB controller) or any other Link-capable software; polls at ~500 µs for sub-millisecond timing
-- **Network auto discovery** — tries to discover and select the correct network interface automatically
-- **TOML config file** — all MIDI channel, note, and CC numbers are fully remappable
-- **CLI overrides** — interface, MIDI port, source, device number, log level
-- **Terminal UI (TUI)** — real-time dashboard with input devices, BPM/phase, MIDI output status, interactive port selection, and a scrolling log panel (powered by [ratatui](https://ratatui.rs))
-
----
-
 ## ✨ Features
 
 ### Pro DJ Link (Ethernet)
@@ -109,6 +82,33 @@ enabled = false
 quantum = 4.0
 poll_interval_us = 500
 ```
+
+---
+
+## 🏗 Architecture
+
+The project is structured as a Rust workspace with shared core logic to ensure consistency across desktop and embedded platforms.
+
+- **`host/`**: Shared core library and Desktop/Laptop application.
+  - **Shared Library**: Centralized Pro DJ Link packet parsing/building and global state management.
+  - **TUI Dashboard**: Real-time Terminal UI with device discovery, BPM status, and interactive MIDI port selection.
+  - **Ableton Link**: Integrated Link engine with hybrid "Auto" mode priority.
+- **`esp32/`**: Firmware for embedded ESP32 hardware.
+  - **WiFi AP**: Creates a dedicated `xdj-midi-setup` network.
+  - **GPIO MIDI**: Low-latency hardware MIDI IN/OUT via UART.
+- **`esp32-emulator/`**: High-performance native emulator of the ESP32 firmware.
+  - **Web Dashboard**: Modern, responsive CSS Grid interface with real-time WebSocket updates.
+  - **Verification Tools**: Built-in simulators for testing master handoff and stopped-deck scenarios.
+- **24-PPQ MIDI clock** — tight Start / Stop / Clock (0xF8) pulses derived from the DJ master tempo
+- **MIDI CC** — continuous BPM coarse/fine, pitch, bar phase, beat phase, playing state, master deck number
+- **MIDI notes** — beat trigger (every beat) and downbeat trigger (beat 1 of every bar), with velocity accents
+- **Two source modes:**
+  - 1. **Pro DJ Link** — listens on the Ethernet network for CDJ-3000 / XDJ-AZ / XDJ-XZ absolute-position packets (~30 ms) and beat packets; works with any Pioneer standalone hardware
+  - 2. **Ableton Link** — joins the Link session broadcast by rekordbox (Performance mode / USB controller) or any other Link-capable software; polls at ~500 µs for sub-millisecond timing
+- **Network auto discovery** — tries to discover and select the correct network interface automatically
+- **TOML config file** — all MIDI channel, note, and CC numbers are fully remappable
+- **CLI overrides** — interface, MIDI port, source, device number, log level
+- **Terminal UI (TUI)** — real-time dashboard with input devices, BPM/phase, MIDI output status, interactive port selection, and a scrolling log panel (powered by [ratatui](https://ratatui.rs))
 
 ---
 

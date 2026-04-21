@@ -58,8 +58,8 @@ smoothing_ms = 0
 
 latency_compensation_ms = 0
 
-# Number of stable beats required before re-acquiring phrase lock start.
-# Clock will wait for phrase start and require this many consistent beats.
+# Re-align interval in beats for phrase/bar phase correction while running.
+# Every N beats, clock re-checks and corrects bar phase if needed.
 phrase_lock_stable_beats = 4
 
 # ── MIDI Note mapping ────────────────────────────────────────────────────────
