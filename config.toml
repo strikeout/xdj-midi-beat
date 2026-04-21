@@ -56,12 +56,11 @@ clock_loop_enabled = true
 # response to pitch-fader changes.  0 = no smoothing. (buggy, needs fix)
 smoothing_ms = 0
 
-# (buggy, needs fix)
 latency_compensation_ms = 0
 
-# Re-align interval in beats for phrase/bar phase correction while running.
-# Every N beats, clock re-checks and corrects bar phase if needed.
-phrase_lock_stable_beats = 1
+# Bar interval for phrase-lock full resync (1 bar = 4 beats).
+# Every N bars, clock performs a full resync.
+phrase_lock_stable_beats = 4
 
 # ── MIDI Note mapping ────────────────────────────────────────────────────────
 

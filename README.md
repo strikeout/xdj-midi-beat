@@ -1,6 +1,6 @@
 # xdj-midi
 
-[![Version](https://img.shields.io/badge/version-1.2.9-blue.svg)](Cargo.toml)
+[![Version](https://img.shields.io/badge/version-1.2.10-blue.svg)](Cargo.toml)
 
 
 
@@ -57,6 +57,7 @@ clock_enabled = true
 clock_loop_enabled = true
 smoothing_ms = 0       # BPM jitter reduction
 latency_compensation_ms = 0
+# Bar interval for phrase-lock full resync (1 bar = 4 beats).
 phrase_lock_stable_beats = 4
 
 [midi.notes]
