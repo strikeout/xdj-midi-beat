@@ -27,7 +27,7 @@ device_name = "xdj-clock"
 [link]
 # Enable Ableton Link session participation.  When enabled, xdj-clock will
 # appear in the Link session (e.g. visible in rekordbox's Link status panel).
-enabled = false
+enabled = true
 
 # Beat quantum — number of beats per bar/loop cycle.
 # 4 = 4/4 time (default).  Phase is expressed as a value in [0, quantum).
@@ -53,14 +53,15 @@ clock_enabled = true
 clock_loop_enabled = true
 
 # BPM smoothing window in milliseconds.  Larger = less jitter but slower
-# response to pitch-fader changes.  0 = no smoothing.
+# response to pitch-fader changes.  0 = no smoothing. (buggy, needs fix)
 smoothing_ms = 0
 
+# (buggy, needs fix)
 latency_compensation_ms = 0
 
 # Re-align interval in beats for phrase/bar phase correction while running.
 # Every N beats, clock re-checks and corrects bar phase if needed.
-phrase_lock_stable_beats = 4
+phrase_lock_stable_beats = 1
 
 # ── MIDI Note mapping ────────────────────────────────────────────────────────
 
