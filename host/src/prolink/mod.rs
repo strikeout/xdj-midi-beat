@@ -84,6 +84,30 @@ pub fn effective_bpm(track_bpm: f64, pitch_raw: u32) -> f64 {
     track_bpm * pitch_raw as f64 / PITCH_NORMAL as f64
 }
 
+/// Scale a BeatPacket timing field from nominal 0% pitch to actual wall-clock ms.
+///
+/// The protocol reports upcoming-beat/bar timing as if pitch were 0%. To align
+/// scheduling/phase with audible playback, convert by pitch ratio:
+///
+/// Formula (conceptual):
+/// `actual_ms = nominal_ms / (pitch_raw / PITCH_NORMAL)`
+///
+/// `BEAT_NONE` (0xFFFF_FFFF) is preserved as-is.
+#[inline]
+pub fn scale_nominal_beat_ms(nominal_ms: u32, pitch_raw: u32) -> u32 {
+    if nominal_ms == BEAT_NONE {
+        return BEAT_NONE;
+    }
+
+    let ratio = pitch_raw as f64 / PITCH_NORMAL as f64;
+    if !ratio.is_finite() || ratio <= 0.0 {
+        return nominal_ms;
+    }
+
+    let scaled = (nominal_ms as f64 / ratio).round();
+    scaled.clamp(0.0, u32::MAX as f64) as u32
+}
+
 // ── Beat constants ────────────────────────────────────────────────────────────
 
 #[allow(dead_code)]

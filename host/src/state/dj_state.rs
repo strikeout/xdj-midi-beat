@@ -5,6 +5,7 @@ use std::time::Instant;
 use parking_lot::RwLock;
 
 use crate::config::Source;
+use crate::prolink::BEAT_NONE;
 use crate::prolink::packets::{AbsPositionPacket, BeatPacket, CdjStatus, MixerStatus};
 
 use super::beat_source::BeatSource;
@@ -269,10 +270,16 @@ impl DjState {
         dev.last_beat_at = Some(received_at);
         if bp.effective_bpm > 0.0 {
             dev.effective_bpm = dev.smooth_bpm(bp.effective_bpm, window);
-            let beat_dur_ms = 60_000.0 / bp.effective_bpm;
-            let time_into_beat = (beat_dur_ms - bp.next_beat_ms as f64).clamp(0.0, beat_dur_ms);
-            dev.beat_phase = (time_into_beat / beat_dur_ms).clamp(0.0, 1.0);
-            dev.bar_phase = ((dev.phrase_16_beat as f64 + dev.beat_phase) / 16.0).clamp(0.0, 1.0);
+            if bp.next_beat_ms != BEAT_NONE {
+                let beat_dur_ms = 60_000.0 / bp.effective_bpm;
+                let time_into_beat = (beat_dur_ms - bp.next_beat_ms as f64).clamp(0.0, beat_dur_ms);
+                dev.beat_phase = (time_into_beat / beat_dur_ms).clamp(0.0, 1.0);
+                dev.bar_phase = ((dev.phrase_16_beat as f64 + dev.beat_phase) / 16.0).clamp(0.0, 1.0);
+            } else {
+                // End-of-track/unknown upcoming beat sentinel must not propagate stale phase.
+                dev.beat_phase = 0.0;
+                dev.bar_phase = 0.0;
+            }
         }
         dev.pitch_pct = bp.pitch_pct;
 
@@ -769,5 +776,34 @@ mod tests {
         state.apply_link_state(121.0, 2, 0.25, 0.5, true, true, Instant::now());
         assert_eq!(state.master.source, Some(BeatSource::ProLink));
         assert_eq!(state.master.bpm, 126.0);
+    }
+
+    #[test]
+    fn beat_none_resets_master_phase_instead_of_leaking_previous_value() {
+        let mut state = DjState::new(30);
+
+        let normal = crate::prolink::packets::BeatPacket {
+            device_number: 1,
+            next_beat_ms: 250,
+            second_beat_ms: 500,
+            next_bar_ms: 1000,
+            pitch_raw: crate::prolink::PITCH_NORMAL,
+            bpm_raw: 12000,
+            beat_in_bar: 2,
+            track_bpm: Some(120.0),
+            effective_bpm: 120.0,
+            pitch_pct: 0.0,
+        };
+        state.apply_beat(&normal, Instant::now());
+        assert!(state.master.beat_phase > 0.0);
+
+        let none = crate::prolink::packets::BeatPacket {
+            next_beat_ms: BEAT_NONE,
+            ..normal
+        };
+        state.apply_beat(&none, Instant::now());
+
+        assert_eq!(state.master.beat_phase, 0.0);
+        assert_eq!(state.master.bar_phase, 0.0);
     }
 }

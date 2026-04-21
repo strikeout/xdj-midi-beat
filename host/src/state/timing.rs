@@ -1,6 +1,7 @@
 use std::time::{Duration, Instant};
 
 use crate::prolink::packets::{AbsPositionPacket, BeatPacket};
+use crate::prolink::BEAT_NONE;
 
 const PHASE_EPSILON: f64 = 1e-6;
 
@@ -105,7 +106,7 @@ impl TimingMeasurement {
         let effective_bpm = packet.effective_bpm;
         let bpm = packet.track_bpm.unwrap_or(effective_bpm);
 
-        let beat_phase = if effective_bpm > 0.0 {
+        let beat_phase = if effective_bpm > 0.0 && packet.next_beat_ms != BEAT_NONE {
             let inv_beat_dur = effective_bpm / 60_000.0;
             // Equivalent to (beat_dur_ms - next_beat_ms) / beat_dur_ms, but avoids
             // subtracting similarly-sized values before normalization.
@@ -333,5 +334,26 @@ mod tests {
             }
             other => panic!("expected Stale, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn prolink_beat_with_none_next_beat_keeps_phase_unknown() {
+        let received_at = Instant::now();
+        let bp = BeatPacket {
+            device_number: 1,
+            next_beat_ms: BEAT_NONE,
+            second_beat_ms: 0,
+            next_bar_ms: 0,
+            pitch_raw: crate::prolink::PITCH_NORMAL,
+            bpm_raw: 12800,
+            beat_in_bar: 2,
+            track_bpm: Some(128.0),
+            effective_bpm: 128.0,
+            pitch_pct: 0.0,
+        };
+
+        let m = TimingMeasurement::from_prolink_beat(&bp, received_at);
+        assert_eq!(m.beat_phase, None);
+        assert_eq!(m.bar_phase, None);
     }
 }

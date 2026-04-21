@@ -3,7 +3,7 @@
 use std::fmt;
 
 use super::{
-    bpm_from_raw, effective_bpm, pitch_to_percent, MAGIC, PKT_ABS_POSITION, PKT_BEAT,
+    bpm_from_raw, effective_bpm, pitch_to_percent, scale_nominal_beat_ms, MAGIC, PKT_ABS_POSITION, PKT_BEAT,
     PKT_CDJ_STATUS, PKT_KEEPALIVE, PKT_MIXER_STATUS,
 };
 
@@ -94,11 +94,11 @@ pub fn parse_keepalive(data: &[u8]) -> Option<KeepAlive> {
 #[derive(Debug, Clone)]
 pub struct BeatPacket {
     pub device_number: u8,
-    /// ms until the next beat at 0% pitch.
+    /// Wall-clock ms until the next beat (pitch-adjusted; `BEAT_NONE` sentinel preserved).
     pub next_beat_ms: u32,
-    /// ms until the 2nd upcoming beat at 0% pitch.
+    /// Wall-clock ms until the 2nd upcoming beat (pitch-adjusted; `BEAT_NONE` preserved).
     pub second_beat_ms: u32,
-    /// ms until next bar (downbeat) at 0% pitch.
+    /// Wall-clock ms until next bar/downbeat (pitch-adjusted; `BEAT_NONE` preserved).
     pub next_bar_ms: u32,
     /// Raw pitch value (0x00100000 = 0%).
     pub pitch_raw: u32,
@@ -131,9 +131,9 @@ pub fn parse_beat(data: &[u8]) -> Option<BeatPacket> {
     };
     Some(BeatPacket {
         device_number: data[0x21],
-        next_beat_ms: u32be(data, 0x24),
-        second_beat_ms: u32be(data, 0x28),
-        next_bar_ms: u32be(data, 0x2c),
+        next_beat_ms: scale_nominal_beat_ms(u32be(data, 0x24), pitch_raw),
+        second_beat_ms: scale_nominal_beat_ms(u32be(data, 0x28), pitch_raw),
+        next_bar_ms: scale_nominal_beat_ms(u32be(data, 0x2c), pitch_raw),
         pitch_raw,
         bpm_raw,
         beat_in_bar: data[0x5c],
@@ -414,6 +414,28 @@ mod tests {
         assert!((bp.track_bpm.unwrap() - 128.0).abs() < 0.01);
         assert!((bp.effective_bpm - 128.0).abs() < 0.01);
         assert!((bp.pitch_pct).abs() < 0.01);
+    }
+
+    #[test]
+    fn beat_packet_timings_are_scaled_by_pitch_and_preserve_none_sentinel() {
+        let mut p = magic_pkt(PKT_BEAT, 0x60);
+        p[0x21] = 1;
+        p[0x5a] = 0x2e; // 120.00
+        p[0x5b] = 0xe0;
+
+        // +8% pitch.
+        let pitch_plus_8 = ((PITCH_NORMAL as f64) * 1.08).round() as u32;
+        p[0x54..0x58].copy_from_slice(&pitch_plus_8.to_be_bytes());
+
+        p[0x24..0x28].copy_from_slice(&500u32.to_be_bytes()); // nominal next beat
+        p[0x28..0x2c].copy_from_slice(&1000u32.to_be_bytes());
+        p[0x2c..0x30].copy_from_slice(&u32::MAX.to_be_bytes()); // sentinel
+        p[0x5c] = 1;
+
+        let bp = parse_beat(&p).expect("beat packet should parse");
+        assert_eq!(bp.next_beat_ms, 463); // 500 / 1.08
+        assert_eq!(bp.second_beat_ms, 926); // 1000 / 1.08
+        assert_eq!(bp.next_bar_ms, u32::MAX);
     }
 
     #[test]
