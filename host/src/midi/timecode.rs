@@ -257,6 +257,12 @@ struct MtcScheduler {
     stats: MtcStats,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlayingLikeState {
+    Active,
+    Inactive,
+}
+
 impl MtcScheduler {
     fn new(enabled: bool, frame_rate: MtcFrameRate) -> Self {
         Self {
@@ -285,6 +291,14 @@ impl MtcScheduler {
 
     fn set_playing_like_override(&mut self, value: Option<bool>) {
         self.playing_like_override = value;
+    }
+
+    fn playing_like_state(&self, playing_like: bool) -> PlayingLikeState {
+        if playing_like {
+            PlayingLikeState::Active
+        } else {
+            PlayingLikeState::Inactive
+        }
     }
 
     fn next_wake(&self) -> Option<Instant> {
@@ -376,14 +390,17 @@ impl MtcScheduler {
             .unwrap_or_else(|| is_playing_like(now, master_bpm, master_is_playing, master_last_beat_at));
 
         // Stop when transport is not playing-like.
-        if !playing_like {
-            if self.running {
-                self.running = false;
-                self.next_qf_deadline = None;
-                self.qf_index = 0;
+        match self.playing_like_state(playing_like) {
+            PlayingLikeState::Inactive => {
+                if self.running {
+                    self.running = false;
+                    self.next_qf_deadline = None;
+                    self.qf_index = 0;
+                }
+                self.last_playing_like = playing_like;
+                return out;
             }
-            self.last_playing_like = playing_like;
-            return out;
+            PlayingLikeState::Active => {}
         }
 
         // If we just transitioned into playing-like, emit a full-frame and start QFs.

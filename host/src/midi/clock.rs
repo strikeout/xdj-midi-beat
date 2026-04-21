@@ -58,6 +58,13 @@ struct ClockState {
     last_timing_received_at: Option<Instant>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClockTransportState {
+    Idle,
+    WaitingForDownbeat { wait_beats_seen: u8 },
+    Running,
+}
+
 impl ClockState {
     fn new() -> Self {
         Self {
@@ -82,9 +89,48 @@ impl ClockState {
     }
 
     fn arm_wait_for_phrase_start(&mut self) {
-        self.waiting_for_downbeat = true;
-        self.wait_beats_seen = 0;
+        self.set_transport_state(ClockTransportState::WaitingForDownbeat { wait_beats_seen: 0 });
         self.last_pulse = Instant::now();
+    }
+
+    fn transport_state(&self) -> ClockTransportState {
+        if self.running {
+            ClockTransportState::Running
+        } else if self.waiting_for_downbeat {
+            ClockTransportState::WaitingForDownbeat {
+                wait_beats_seen: self.wait_beats_seen,
+            }
+        } else {
+            ClockTransportState::Idle
+        }
+    }
+
+    fn set_transport_state(&mut self, state: ClockTransportState) {
+        match state {
+            ClockTransportState::Idle => {
+                self.running = false;
+                self.waiting_for_downbeat = false;
+                self.wait_beats_seen = 0;
+            }
+            ClockTransportState::WaitingForDownbeat { wait_beats_seen } => {
+                self.running = false;
+                self.waiting_for_downbeat = true;
+                self.wait_beats_seen = wait_beats_seen;
+            }
+            ClockTransportState::Running => {
+                self.running = true;
+                self.waiting_for_downbeat = false;
+                self.wait_beats_seen = 0;
+            }
+        }
+    }
+
+    fn transition_to_running(&mut self) {
+        self.set_transport_state(ClockTransportState::Running);
+    }
+
+    fn transition_to_idle(&mut self) {
+        self.set_transport_state(ClockTransportState::Idle);
     }
 }
 
@@ -197,16 +243,14 @@ fn handle_timing_snapshot(
     let beat_in_bar = measurement.beat_in_bar.unwrap_or(master.beat_in_bar);
     let is_beat_edge = matches!(measurement.kind, MeasurementKind::ProLinkBeatPacket);
 
-    if cs.waiting_for_downbeat {
+    if matches!(cs.transport_state(), ClockTransportState::WaitingForDownbeat { .. }) {
         if is_beat_edge && beat_in_bar == 1
         {
             cs.wait_beats_seen = cs.wait_beats_seen.saturating_add(1);
             let fallback_start = cs.wait_beats_seen >= stable_beats.max(1);
             if phrase_beat == 1 || fallback_start {
-                cs.waiting_for_downbeat = false;
-                cs.running = true;
+                cs.transition_to_running();
                 cs.beat_count = 1;
-                cs.wait_beats_seen = 0;
                 cs.has_started = true;
                 let _ = midi.send_message(&[MSG_START]);
                 if let Some(mut a) = activity.try_lock() {
@@ -457,7 +501,7 @@ fn handle_master_change(
         let _ = midi.send_message(&[MSG_STOP]);
     }
 
-    cs.running = false;
+    cs.transition_to_idle();
     cs.beat_count = 0;
     cs.arm_wait_for_phrase_start();
 
@@ -479,10 +523,8 @@ fn handle_master_change_without_phrase_wait(
         let _ = midi.send_message(&[MSG_STOP]);
     }
 
-    cs.running = false;
+    cs.transition_to_idle();
     cs.beat_count = 0;
-    cs.waiting_for_downbeat = false;
-    cs.wait_beats_seen = 0;
     cs.last_timing_received_at = None;
     cs.last_pulse = Instant::now();
 
@@ -520,7 +562,7 @@ fn handle_prolink_beat_loop_disabled(
     }
 
     cs.set_bpm(bp.effective_bpm);
-    cs.waiting_for_downbeat = false;
+    cs.set_transport_state(ClockTransportState::Idle);
     let resync_every = resync_every_beats.max(1);
 
     if cs.running {
@@ -538,7 +580,7 @@ fn handle_prolink_beat_loop_disabled(
             a.clock_timing_delta_ms = beat_timing_delta_ms(cs, received_at);
         }
     } else {
-        cs.running = true;
+        cs.transition_to_running();
         cs.pulse_index = 0;
         cs.last_pulse = received_at;
         cs.beat_count = 1;
@@ -634,7 +676,7 @@ pub async fn run(
             clock_enabled = current_enabled;
             if !clock_enabled {
                 if cs.running {
-                    cs.running = false;
+                    cs.transition_to_idle();
                     cs.has_started = false;
                     let _ = midi.send_message(&[MSG_STOP]);
                     tracing::info!("MIDI clock disabled at runtime");
@@ -650,8 +692,7 @@ pub async fn run(
             clock_loop_enabled = current_loop_enabled;
             if !clock_loop_enabled {
                 tracing::info!("MIDI clock loop disabled at runtime");
-                cs.waiting_for_downbeat = false;
-                cs.wait_beats_seen = 0;
+                cs.transition_to_idle();
                 cs.last_timing_received_at = None;
             } else {
                 tracing::info!("MIDI clock loop enabled at runtime");
@@ -754,7 +795,7 @@ pub async fn run(
         // ── Start / Stop / Continue messages ─────────────────────────────────
         if clock_loop_enabled {
             if clock_enabled && is_playing && !cs.running && !cs.waiting_for_downbeat {
-                cs.running = true;
+                cs.transition_to_running();
                 cs.pulse_index = 0;
                 cs.last_pulse = Instant::now();
                 if bpm > 0.0 {
@@ -782,12 +823,12 @@ pub async fn run(
                 }
                 tracing::debug!(msg = if msg == MSG_START { "Start" } else { "Continue" }, "MIDI transport sent");
             } else if (!clock_enabled || !is_playing) && cs.running {
-                cs.running = false;
+                cs.transition_to_idle();
                 let _ = midi.send_message(&[MSG_STOP]);
                 tracing::debug!("MIDI Stop sent");
             }
         } else if !clock_enabled && cs.running {
-            cs.running = false;
+            cs.transition_to_idle();
             let _ = midi.send_message(&[MSG_STOP]);
             tracing::debug!("MIDI Stop sent");
         }
