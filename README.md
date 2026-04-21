@@ -1,6 +1,6 @@
 # xdj-midi
 
-[![Version](https://img.shields.io/badge/version-1.1.7-blue.svg)](Cargo.toml)
+[![Version](https://img.shields.io/badge/version-1.2.9-blue.svg)](Cargo.toml)
 
 A robust bridge between Pioneer Pro DJ Link (CDJ/XDJ), Ableton Link, and MIDI. Synchronize your DAWs, drum machines, and hardware synths with your DJ setup with sub-millisecond precision.
 
@@ -50,6 +50,8 @@ The project is structured as a Rust workspace with shared core logic to ensure c
     mkdir -p vendor
     curl -sL https://crates.io/api/v1/crates/rusty_link/0.2.3/download | tar xzf - -C vendor
     mv vendor/rusty_link-0.2.3 vendor/rusty_link
+    cp .github/vendor-patches/build.rs vendor/rusty_link/build.rs
+    cp .github/vendor-patches/link_bindings.rs vendor/rusty_link/link_bindings.rs
     ```
 2.  **Run**:
     ```sh
@@ -84,16 +86,28 @@ interface = "auto"    # Network adapter selection
 output = "auto"       # MIDI port substring match
 clock_enabled = true
 clock_loop_enabled = true
-smoothing_ms = 30     # BPM jitter reduction
+smoothing_ms = 0      # BPM jitter reduction
+latency_compensation_ms = 0
+phrase_lock_stable_beats = 4
+
+[midi.mtc]
+enabled = false
+frame_rate = "25"
+
+[link]
+enabled = false
+quantum = 4.0
+poll_interval_us = 500
 ```
 
 ---
 
-## 🛠 Project State (v1.1.7)
+## 🛠 Project State (v1.2.9)
 - **v1.1.0**: Migrated emulator to WebSockets.
 - **v1.1.2**: Implemented proactive Pro DJ Link participation (Keep-alives + Unicasts).
 - **v1.1.4**: Fixed master handoff and play-state latching/timeouts.
 - **v1.1.7**: Restored Ableton Link with critical dangling-pointer fixes in `rusty_link`.
+- **v1.2.9**: Tightened MIDI clock/MTC scheduling and pitch-correct beat timing semantics.
 
 ---
 
