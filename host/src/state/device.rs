@@ -1,0 +1,118 @@
+use std::collections::VecDeque;
+use std::time::Instant;
+
+use crate::prolink::packets::PlayState;
+
+use super::beat_source::BeatSource;
+use super::song_structure::SongStructure;
+
+/// Per-device state tracked for each CDJ/mixer on the network.
+#[derive(Debug, Clone)]
+pub struct DeviceState {
+    pub device_number: u8,
+    pub is_master: bool,
+    pub is_playing: bool,
+    pub is_on_air: bool,
+    pub is_sync: bool,
+    pub play_state: PlayState,
+    pub effective_bpm: f64,
+    pub pitch_pct: f64,
+    pub beat_in_bar: u8,
+    pub beat_count: u32,
+    pub playhead_ms: Option<u32>,
+    pub bar_phase: f64,
+    pub beat_phase: f64,
+    pub phrase_16_beat: u8,
+    pub last_beat_at: Option<Instant>,
+    bpm_history: VecDeque<f64>,
+    pub rekordbox_id: u32,
+    pub track_slot: u8,
+    pub track_type: u8,
+    pub track_source_player: u8,
+    pub track_title: String,
+    pub track_artist: String,
+    pub track_key: String,
+    pub track_bpm_meta: Option<f64>,
+    pub song_structure: Option<SongStructure>,
+    pub current_phrase_idx: Option<usize>,
+    pub prev_phrase_idx: Option<usize>,
+}
+
+impl DeviceState {
+    pub(crate) fn new(device_number: u8) -> Self {
+        Self {
+            device_number,
+            is_master: false,
+            is_playing: false,
+            is_on_air: false,
+            is_sync: false,
+            play_state: PlayState::NoTrack,
+            effective_bpm: 0.0,
+            pitch_pct: 0.0,
+            beat_in_bar: 0,
+            beat_count: u32::MAX,
+            playhead_ms: None,
+            bar_phase: 0.0,
+            beat_phase: 0.0,
+            phrase_16_beat: 0,
+            last_beat_at: None,
+            bpm_history: VecDeque::with_capacity(8),
+            rekordbox_id: 0,
+            track_slot: 0,
+            track_type: 0,
+            track_source_player: 0,
+            track_title: String::new(),
+            track_artist: String::new(),
+            track_key: String::new(),
+            track_bpm_meta: None,
+            song_structure: None,
+            current_phrase_idx: None,
+            prev_phrase_idx: None,
+        }
+    }
+
+    pub(crate) fn smooth_bpm(&mut self, raw: f64, window: usize) -> f64 {
+        if window == 0 || raw <= 0.0 {
+            return raw;
+        }
+        self.bpm_history.push_back(raw);
+        while self.bpm_history.len() > window {
+            self.bpm_history.pop_front();
+        }
+        self.bpm_history.iter().sum::<f64>() / self.bpm_history.len() as f64
+    }
+}
+
+/// The distilled state of the tempo master.
+#[derive(Debug, Clone)]
+pub struct MasterState {
+    pub device_number: u8,
+    pub source: Option<BeatSource>,
+    pub bpm: f64,
+    pub pitch_pct: f64,
+    pub beat_in_bar: u8,
+    pub bar_phase: f64,
+    pub beat_phase: f64,
+    pub is_playing: bool,
+    pub last_beat_at: Option<Instant>,
+    pub is_virtual_master: bool,
+    pub phrase_16_beat: u8,
+}
+
+impl Default for MasterState {
+    fn default() -> Self {
+        Self {
+            device_number: 0,
+            source: None,
+            bpm: 0.0,
+            pitch_pct: 0.0,
+            beat_in_bar: 0,
+            bar_phase: 0.0,
+            beat_phase: 0.0,
+            is_playing: false,
+            last_beat_at: None,
+            is_virtual_master: false,
+            phrase_16_beat: 0,
+        }
+    }
+}

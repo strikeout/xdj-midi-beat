@@ -4,7 +4,7 @@
 #   "auto"    — prefer Ableton Link when peers are detected, else Pro DJ Link
 #   "link"    — Ableton Link only (for rekordbox Performance mode / USB controllers)
 #   "prolink" — Pro DJ Link only (for standalone CDJ/XDJ hardware on Ethernet)
-source = "prolink"
+source = "auto"
 
 # Network interface to use for Pro DJ Link communication.
 # "auto" = pick the first non-loopback interface that has an IPv4 address.
@@ -27,7 +27,7 @@ device_name = "xdj-clock"
 [link]
 # Enable Ableton Link session participation.  When enabled, xdj-clock will
 # appear in the Link session (e.g. visible in rekordbox's Link status panel).
-enabled = true
+enabled = false
 
 # Beat quantum — number of beats per bar/loop cycle.
 # 4 = 4/4 time (default).  Phase is expressed as a value in [0, quantum).
@@ -48,11 +48,19 @@ output = "auto"
 # Enable 24-PPQ MIDI clock output (Start / Stop / Continue + 0xF8 pulses).
 clock_enabled = true
 
+# Enable phrase-lock + timing snapshot sync loop for MIDI clock.
+# false = free-run from current BPM without waiting for phrase re-lock.
+clock_loop_enabled = true
+
 # BPM smoothing window in milliseconds.  Larger = less jitter but slower
 # response to pitch-fader changes.  0 = no smoothing.
-smoothing_ms = 30
+smoothing_ms = 0
 
 latency_compensation_ms = 0
+
+# Number of stable beats required before re-acquiring phrase lock start.
+# Clock will wait for phrase start and require this many consistent beats.
+phrase_lock_stable_beats = 4
 
 # ── MIDI Note mapping ────────────────────────────────────────────────────────
 

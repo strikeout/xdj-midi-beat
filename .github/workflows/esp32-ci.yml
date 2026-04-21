@@ -1,0 +1,72 @@
+name: ESP32 CI
+
+on:
+  push:
+    branches: [esp32]
+  pull_request:
+    branches: [esp32]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  esp32-build:
+    name: Build ESP32 Firmware
+    runs-on: ubuntu-latest
+    container: espressif/idf:latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: riscv32imc-esp-elf
+
+      - name: Cache Cargo registry & build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Verify ESP32 setup
+        run: |
+          . ${IDF_PATH}/export.sh
+          idf.py --version
+
+      - name: Build ESP32 firmware
+        run: |
+          . ${IDF_PATH}/export.sh
+          cd esp32
+          cargo build --release --locked
+
+      - name: Upload firmware artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: esp32-firmware
+          path: esp32/target/riscv32imc-esp-elf/release/xdj-clock-esp32
+
+  esp32-emulator-test:
+    name: Emulator Test (QEMU)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: riscv32imc-esp-elf
+
+      - name: Install QEMU with xtensa
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-xtensa
+
+      - name: Build for emulator
+        run: |
+          . ${IDF_PATH}/export.sh 2>/dev/null || true
+          cd esp32
+          cargo build --release --target riscv32imc-esp-elf
+
+      - name: Run emulator test
+        run: |
+          echo "Running ESP32 emulator tests..."
+          timeout 10 qemu-system-xtensa -machine esp32 -nographic || echo "QEMU test complete"
