@@ -9,6 +9,6 @@ mod test_utils;
 
 #[allow(unused_imports)]
 pub use transport::{
-    open_midi_output, MidiError, MidiOutConnection, MidiOutHandle, MidirOutConnection,
-    MidiTransport,
+    open_midi_output, MidiError, MidiOutConnection, MidiOutHandle, MidiTransport,
+    MidirOutConnection,
 };

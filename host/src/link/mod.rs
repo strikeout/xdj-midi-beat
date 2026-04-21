@@ -32,7 +32,6 @@ pub async fn run(
     link.enable_start_stop_sync(true);
     tracing::info!("AblLink enabled (start/stop sync: true)");
 
-
     // Simple peer-count callback — logging only, no state capture needed.
     let state_peer = Arc::clone(&state);
     link.set_num_peers_callback(move |n| {

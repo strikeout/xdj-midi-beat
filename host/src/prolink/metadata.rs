@@ -19,9 +19,7 @@ use tokio::sync::mpsc;
 use tokio::time::timeout;
 
 use super::discovery::DeviceTable;
-use crate::state::{
-    PhraseEntry, PhraseKind, SharedState, SongStructure, TrackChange, TrackMood,
-};
+use crate::state::{PhraseEntry, PhraseKind, SharedState, SongStructure, TrackChange, TrackMood};
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -161,11 +159,7 @@ pub async fn run(
                             mood = ?ss.mood,
                             "Song structure received"
                         );
-                        st.set_song_structure(
-                            change2.device_number,
-                            change2.rekordbox_id,
-                            ss,
-                        );
+                        st.set_song_structure(change2.device_number, change2.rekordbox_id, ss);
                     }
                 }
                 Ok(Err(e)) => {
@@ -273,7 +267,9 @@ async fn fetch_metadata(
             Field::Number(item_count), // total
             Field::Number(0),
         ],
-        &[FIELD_U32, FIELD_U32, FIELD_U32, FIELD_U32, FIELD_U32, FIELD_U32],
+        &[
+            FIELD_U32, FIELD_U32, FIELD_U32, FIELD_U32, FIELD_U32, FIELD_U32,
+        ],
     )
     .await?;
 
@@ -290,7 +286,10 @@ async fn fetch_metadata(
                 parse_menu_item(item_index, &msg, &mut metadata);
             }
             other => {
-                tracing::debug!(msg_type = format!("0x{:04x}", other), "Unknown menu message");
+                tracing::debug!(
+                    msg_type = format!("0x{:04x}", other),
+                    "Unknown menu message"
+                );
             }
         }
     }

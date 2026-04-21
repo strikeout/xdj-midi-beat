@@ -30,12 +30,7 @@ pub struct LogThrottle {
 impl LogThrottle {
     pub fn should_log(&mut self, now: Instant, interval: Duration) -> bool {
         match self.last {
-            Some(prev)
-                if now
-                    .checked_duration_since(prev)
-                    .unwrap_or(Duration::ZERO)
-                    < interval =>
-            {
+            Some(prev) if now.checked_duration_since(prev).unwrap_or(Duration::ZERO) < interval => {
                 false
             }
             _ => {
@@ -236,9 +231,15 @@ impl TimingModel {
             .unwrap_or(Duration::ZERO);
 
         if age <= self.stale_after {
-            TimingSnapshot::Fresh { measurement: m, age }
+            TimingSnapshot::Fresh {
+                measurement: m,
+                age,
+            }
         } else {
-            TimingSnapshot::Stale { measurement: m, age }
+            TimingSnapshot::Stale {
+                measurement: m,
+                age,
+            }
         }
     }
 }
@@ -247,8 +248,14 @@ impl TimingModel {
 #[derive(Debug, Clone)]
 pub enum TimingSnapshot {
     NoMeasurement,
-    Fresh { measurement: TimingMeasurement, age: Duration },
-    Stale { measurement: TimingMeasurement, age: Duration },
+    Fresh {
+        measurement: TimingMeasurement,
+        age: Duration,
+    },
+    Stale {
+        measurement: TimingMeasurement,
+        age: Duration,
+    },
 }
 
 #[cfg(test)]
@@ -311,7 +318,10 @@ mod tests {
     #[test]
     fn timing_model_exposes_explicit_no_measurement_and_stale_snapshots_without_panicking() {
         let model = TimingModel::new(Duration::from_millis(100));
-        assert!(matches!(model.snapshot_at(Instant::now()), TimingSnapshot::NoMeasurement));
+        assert!(matches!(
+            model.snapshot_at(Instant::now()),
+            TimingSnapshot::NoMeasurement
+        ));
 
         let mut model = model;
         let now = Instant::now();

@@ -362,8 +362,14 @@ impl MidiTransport for MidiOutHandle {
 
         let lane = lane_for_message(msg);
         let send_res = match lane {
-            MidiLane::Realtime => self.tx_realtime.try_send(msg.to_vec()).map_err(|e| e.to_string()),
-            MidiLane::Normal => self.tx_normal.try_send(msg.to_vec()).map_err(|e| e.to_string()),
+            MidiLane::Realtime => self
+                .tx_realtime
+                .try_send(msg.to_vec())
+                .map_err(|e| e.to_string()),
+            MidiLane::Normal => self
+                .tx_normal
+                .try_send(msg.to_vec())
+                .map_err(|e| e.to_string()),
         };
 
         send_res.map_err(|e| {
@@ -533,17 +539,22 @@ mod tests {
 
         tokio::time::timeout(Duration::from_millis(200), midi.barrier())
             .await
-            .expect("worker barrier should complete")
-            ;
+            .expect("worker barrier should complete");
 
         // Once disconnected, we should not block; we should get a fast error.
-        assert!(matches!(midi.send_message(&[0xFC]), Err(MidiError::NotConnected)));
+        assert!(matches!(
+            midi.send_message(&[0xFC]),
+            Err(MidiError::NotConnected)
+        ));
     }
 
     #[tokio::test]
     async fn not_connected_is_fast_and_does_not_deadlock() {
         let midi = MidiOutHandle::start(16, None);
-        assert!(matches!(midi.send_message(&[0xF8]), Err(MidiError::NotConnected)));
+        assert!(matches!(
+            midi.send_message(&[0xF8]),
+            Err(MidiError::NotConnected)
+        ));
 
         tokio::time::timeout(Duration::from_millis(200), midi.barrier())
             .await
@@ -557,9 +568,11 @@ mod tests {
         let midi = MidiOutHandle::start(4096, Some(conn));
 
         for i in 0u8..80 {
-            midi.send_message(&[0xB0, i]).expect("normal send should enqueue");
+            midi.send_message(&[0xB0, i])
+                .expect("normal send should enqueue");
         }
-        midi.send_message(&[0xF8]).expect("realtime clock should enqueue");
+        midi.send_message(&[0xF8])
+            .expect("realtime clock should enqueue");
         midi.barrier().await;
 
         let msgs = sent.lock().unwrap().clone();

@@ -418,6 +418,15 @@ impl TuiState {
 
     /// Refresh the MIDI port list from midir.  Returns the number of ports found.
     pub fn refresh_midi_ports(&mut self) -> usize {
+        let active_name = self
+            .midi_ports
+            .get(self.active_port_idx)
+            .map(|port| port.name.clone());
+        let cursor_name = self
+            .midi_ports
+            .get(self.cursor_port_idx)
+            .map(|port| port.name.clone());
+
         self.midi_ports.clear();
         if let Ok(midi_out) = midir::MidiOutput::new("xdj-clock-tui") {
             let ports = midi_out.ports();
@@ -427,12 +436,35 @@ impl TuiState {
                 }
             }
         }
-        if self.active_port_idx >= self.midi_ports.len() {
+
+        if let Some(active_name) = active_name {
+            if let Some(idx) = self
+                .midi_ports
+                .iter()
+                .position(|port| port.name == active_name)
+            {
+                self.active_port_idx = idx;
+            } else if self.active_port_idx >= self.midi_ports.len() {
+                self.active_port_idx = self.midi_ports.len().saturating_sub(1);
+            }
+        } else if self.active_port_idx >= self.midi_ports.len() {
             self.active_port_idx = self.midi_ports.len().saturating_sub(1);
         }
-        if self.cursor_port_idx >= self.midi_ports.len() {
+
+        if let Some(cursor_name) = cursor_name {
+            if let Some(idx) = self
+                .midi_ports
+                .iter()
+                .position(|port| port.name == cursor_name)
+            {
+                self.cursor_port_idx = idx;
+            } else if self.cursor_port_idx >= self.midi_ports.len() {
+                self.cursor_port_idx = self.midi_ports.len().saturating_sub(1);
+            }
+        } else if self.cursor_port_idx >= self.midi_ports.len() {
             self.cursor_port_idx = self.midi_ports.len().saturating_sub(1);
         }
+
         self.midi_ports.len()
     }
 
@@ -606,7 +638,7 @@ pub fn get_value(cfg: &Config, interfaces: &[NetworkIfaceInfo], idx: usize) -> S
         }
         5 => format!("{} ms", cfg.midi.smoothing_ms),
         6 => format!("{} ms", cfg.midi.latency_compensation_ms),
-        7 => format!("{} beats", cfg.midi.phrase_lock_stable_beats),
+        7 => format!("{} bars", cfg.midi.phrase_lock_stable_beats),
         8 => (cfg.midi.notes.channel + 1).to_string(),
         9 => cfg.midi.notes.beat.to_string(),
         10 => cfg.midi.notes.downbeat.to_string(),
@@ -841,7 +873,6 @@ pub fn apply_numeric_input(cfg: &mut Config, idx: usize, value: &str) -> bool {
         _ => false,
     }
 }
-
 
 pub fn selected_interface_name_ip(cfg: &Config, interfaces: &[NetworkIfaceInfo]) -> String {
     selected_interface_index(cfg, interfaces)

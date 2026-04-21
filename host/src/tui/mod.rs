@@ -40,16 +40,15 @@ pub async fn run(
 ) -> anyhow::Result<()> {
     // ── TUI state ────────────────────────────────────────────────────────────
     let mut tui = TuiState::new(log_buf, midi_activity);
-    tui.refresh_midi_ports();
-    tui.refresh_interfaces();
+    refresh_connectivity(&mut tui);
 
     // Try to match the active port to the config name.
     let startup_cfg = cfg.read().clone();
-    if let Some(idx) = tui
-        .midi_ports
-        .iter()
-        .position(|p| p.name.to_lowercase().contains(&startup_cfg.midi.output.to_lowercase()))
-    {
+    if let Some(idx) = tui.midi_ports.iter().position(|p| {
+        p.name
+            .to_lowercase()
+            .contains(&startup_cfg.midi.output.to_lowercase())
+    }) {
         tui.active_port_idx = idx;
         tui.cursor_port_idx = idx;
     }
@@ -63,6 +62,10 @@ pub async fn run(
     // ── Render ticker (~30 fps) ──────────────────────────────────────────────
     let mut render_tick = tokio::time::interval(Duration::from_millis(33));
     render_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
+    // ── Connectivity refresh ticker (~3 s) ───────────────────────────────────
+    let mut refresh_tick = tokio::time::interval(Duration::from_secs(3));
+    refresh_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
     // ── Beat flash updater: subscribe to dj_state changes ────────────────────
     // We just poll the shared state each frame — cheap with parking_lot reads.
@@ -82,22 +85,13 @@ pub async fn run(
                             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                                 tui.should_quit = true;
                             }
-                            KeyCode::Char('1') if !tui.editing => {
-                                tui.editing = false;
-                                tui.edit_buffer.clear();
-                                tui.active_panel = ActivePanel::InputSettings;
-                                tui.settings_cursor = 0;
-                            }
-                            KeyCode::Char('2') if !tui.editing => {
-                                tui.editing = false;
-                                tui.edit_buffer.clear();
-                                tui.active_panel = ActivePanel::MidiSettings;
-                                tui.settings_cursor = MIDI_SETTINGS_START;
-                            }
-                            KeyCode::Char('3') if !tui.editing => {
-                                tui.editing = false;
-                                tui.edit_buffer.clear();
-                                tui.active_panel = ActivePanel::MidiPorts;
+                            KeyCode::Tab | KeyCode::BackTab if !tui.editing => {
+                                let next_panel = match tui.active_panel {
+                                    ActivePanel::InputSettings => ActivePanel::MidiSettings,
+                                    ActivePanel::MidiSettings => ActivePanel::MidiPorts,
+                                    ActivePanel::MidiPorts => ActivePanel::InputSettings,
+                                };
+                                focus_panel(&mut tui, next_panel);
                             }
                             KeyCode::Up | KeyCode::Char('k') if tui.active_panel == ActivePanel::MidiPorts => {
                                 tui.cursor_up();
@@ -108,10 +102,7 @@ pub async fn run(
                             KeyCode::Enter if tui.active_panel == ActivePanel::MidiPorts => {
                                 switch_midi_port(&mut tui, &midi_out, &cfg).await;
                             }
-                            KeyCode::Char('r') => {
-                                tui.refresh_midi_ports();
-                                tui.refresh_interfaces();
-                            }
+                            KeyCode::Char('r') => refresh_connectivity(&mut tui),
                             _ if matches!(tui.active_panel, ActivePanel::InputSettings | ActivePanel::MidiSettings) => {
                                 handle_settings_key(&mut tui, &cfg, &cfg_change_tx, key.code);
                             }
@@ -133,6 +124,11 @@ pub async fn run(
                 terminal.draw(|f| {
                     render::draw(f, &tui, &dj_state, &device_table, &cfg);
                 })?;
+            }
+
+            // ── Periodic connectivity refresh ───────────────────────────────
+            _ = refresh_tick.tick() => {
+                refresh_connectivity(&mut tui);
             }
         }
 
@@ -192,6 +188,22 @@ fn handle_settings_key(
     }
 }
 
+fn focus_panel(tui: &mut TuiState, panel: ActivePanel) {
+    tui.editing = false;
+    tui.edit_buffer.clear();
+    tui.active_panel = panel;
+    match panel {
+        ActivePanel::InputSettings => tui.settings_cursor = 0,
+        ActivePanel::MidiSettings => tui.settings_cursor = MIDI_SETTINGS_START,
+        ActivePanel::MidiPorts => {}
+    }
+}
+
+fn refresh_connectivity(tui: &mut TuiState) {
+    tui.refresh_midi_ports();
+    tui.refresh_interfaces();
+}
+
 fn cycle_setting(
     tui: &mut TuiState,
     cfg: &SharedConfig,
@@ -203,12 +215,25 @@ fn cycle_setting(
     if apply_change(&mut guard, &interfaces, tui.settings_cursor, direction) {
         let _ = cfg_change_tx.send(());
         match tui.settings_cursor {
-            0 => tracing::info!(interface = %guard.interface, "Network interface changed; restart required for network tasks"),
-            1 => tracing::info!(mode = ?guard.source, "Source mode changed; restart may be required for running engines"),
-            3 => tracing::info!(enabled = guard.midi.clock_enabled, "MIDI clock setting changed"),
-            4 => tracing::info!(enabled = guard.midi.clock_loop_enabled, "MIDI clock loop setting changed"),
+            0 => {
+                tracing::info!(interface = %guard.interface, "Network interface changed; restart required for network tasks")
+            }
+            1 => {
+                tracing::info!(mode = ?guard.source, "Source mode changed; restart may be required for running engines")
+            }
+            3 => tracing::info!(
+                enabled = guard.midi.clock_enabled,
+                "MIDI clock setting changed"
+            ),
+            4 => tracing::info!(
+                enabled = guard.midi.clock_loop_enabled,
+                "MIDI clock loop setting changed"
+            ),
             21 => tracing::info!(enabled = guard.midi.mtc.enabled, "MTC setting changed"),
-            22 => tracing::info!(frame_rate = guard.midi.mtc.frame_rate.label(), "MTC frame rate changed"),
+            22 => tracing::info!(
+                frame_rate = guard.midi.mtc.frame_rate.label(),
+                "MTC frame rate changed"
+            ),
             _ => {}
         }
     }
@@ -231,15 +256,33 @@ fn activate_setting(tui: &mut TuiState, cfg: &SharedConfig, cfg_change_tx: &watc
 
 fn log_setting_change(idx: usize, cfg: &crate::config::Config) {
     match idx {
-        2 => tracing::info!(device_number = cfg.device_number, "Device number changed; restart required for network tasks"),
-        4 => tracing::info!(enabled = cfg.midi.clock_loop_enabled, "MIDI clock loop setting changed"),
-        5 => tracing::info!(smoothing_ms = cfg.midi.smoothing_ms, "BPM smoothing setting changed"),
-        6 => tracing::info!(latency_ms = cfg.midi.latency_compensation_ms, "Latency compensation changed"),
-        7 => tracing::info!(beats = cfg.midi.phrase_lock_stable_beats, "Phrase/bar realign interval changed"),
+        2 => tracing::info!(
+            device_number = cfg.device_number,
+            "Device number changed; restart required for network tasks"
+        ),
+        4 => tracing::info!(
+            enabled = cfg.midi.clock_loop_enabled,
+            "MIDI clock loop setting changed"
+        ),
+        5 => tracing::info!(
+            smoothing_ms = cfg.midi.smoothing_ms,
+            "BPM smoothing setting changed"
+        ),
+        6 => tracing::info!(
+            latency_ms = cfg.midi.latency_compensation_ms,
+            "Latency compensation changed"
+        ),
+        7 => tracing::info!(
+            bars = cfg.midi.phrase_lock_stable_beats,
+            "Phrase-lock bar resync interval changed"
+        ),
         8 => tracing::info!(channel = cfg.midi.notes.channel + 1, "Note channel changed"),
         9 => tracing::info!(note = cfg.midi.notes.beat, "Beat note changed"),
         10 => tracing::info!(note = cfg.midi.notes.downbeat, "Downbeat note changed"),
-        11 => tracing::info!(note = cfg.midi.notes.phrase_change, "Phrase change note changed"),
+        11 => tracing::info!(
+            note = cfg.midi.notes.phrase_change,
+            "Phrase change note changed"
+        ),
         12 => tracing::info!(channel = cfg.midi.cc.channel + 1, "CC channel changed"),
         13 => tracing::info!(cc = cfg.midi.cc.bpm_coarse, "BPM coarse CC changed"),
         14 => tracing::info!(cc = cfg.midi.cc.bpm_fine, "BPM fine CC changed"),
@@ -250,7 +293,10 @@ fn log_setting_change(idx: usize, cfg: &crate::config::Config) {
         19 => tracing::info!(cc = cfg.midi.cc.master_deck, "Master deck CC changed"),
         20 => tracing::info!(cc = cfg.midi.cc.phrase_16, "Phrase 16 CC changed"),
         21 => tracing::info!(enabled = cfg.midi.mtc.enabled, "MTC setting changed"),
-        22 => tracing::info!(frame_rate = cfg.midi.mtc.frame_rate.label(), "MTC frame rate changed"),
+        22 => tracing::info!(
+            frame_rate = cfg.midi.mtc.frame_rate.label(),
+            "MTC frame rate changed"
+        ),
         _ => {}
     }
 }
@@ -276,9 +322,7 @@ async fn switch_midi_port(tui: &mut TuiState, midi_out: &MidiOutHandle, cfg: &Sh
     };
 
     // Swap (worker-owned): send Stop on old connection before dropping.
-    midi_out
-        .switch_connection(Some(new_conn), true)
-        .await;
+    midi_out.switch_connection(Some(new_conn), true).await;
 
     tui.active_port_idx = target_idx;
     cfg.write().midi.output = port_info.name.clone();
@@ -292,5 +336,7 @@ fn open_midi_by_index(index: usize) -> anyhow::Result<MidiOutputConnection> {
     let port = ports
         .get(index)
         .ok_or_else(|| anyhow::anyhow!("MIDI port index {index} no longer valid"))?;
-    midi_out.connect(port, "xdj-clock").map_err(|e| anyhow::anyhow!("{}", e))
+    midi_out
+        .connect(port, "xdj-clock")
+        .map_err(|e| anyhow::anyhow!("{}", e))
 }

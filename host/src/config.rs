@@ -70,7 +70,7 @@ pub struct MidiConfig {
     pub clock_loop_enabled: bool,
     pub smoothing_ms: u64,
     pub latency_compensation_ms: i64,
-    /// Beat interval for phrase/bar phase re-check and realignment.
+    /// Bar interval for phrase-lock full resync (1 bar = 4 beats).
     pub phrase_lock_stable_beats: u8,
     pub notes: NoteConfig,
     pub cc: CcConfig,
@@ -291,7 +291,7 @@ fn validate(cfg: &Config) -> anyhow::Result<()> {
     );
     anyhow::ensure!(
         (1..=32).contains(&cfg.midi.phrase_lock_stable_beats),
-        "midi.phrase_lock_stable_beats (realign interval) must be 1 to 32, got {}",
+        "midi.phrase_lock_stable_beats (bar resync interval) must be 1 to 32, got {}",
         cfg.midi.phrase_lock_stable_beats
     );
     anyhow::ensure!(

@@ -1,60 +1,158 @@
 # xdj-midi
 
-[![Version](https://img.shields.io/badge/version-1.2.9-blue.svg)](Cargo.toml)
+[![Version](https://img.shields.io/badge/version-1.2.10-blue.svg)](Cargo.toml)
 
-Bridge between Pioneer CDJ/XDJ hardware (Pro DJ Link) or rekordbox Performance mode (Ableton Link) and MIDI clock, MTC, CC, and note output. Lets any DMX light setup, DAW, drum machine, or hardware synth stay in sync with your DJ setup. Standalone, highly optimized, uses less than 5 MB of RAM.
 
----
 
-## 🏗 Architecture
+![Terminal UI in action](./docs/tui_v1.2.9.png?auto=compress&cs=tinysrgb&dpr=3 "TUI on MacOS")
 
-The project is structured as a Rust workspace with shared core logic to ensure consistency across desktop and embedded platforms.
-
-- **`host/`**: Shared core library and Desktop/Laptop application.
-  - **Shared Library**: Centralized Pro DJ Link packet parsing/building and global state management.
-  - **TUI Dashboard**: Real-time Terminal UI with device discovery, BPM status, and interactive MIDI port selection.
-  - **Ableton Link**: Integrated Link engine with hybrid "Auto" mode priority.
-- **`esp32/`**: Firmware for embedded ESP32 hardware.
-  - **WiFi AP**: Creates a dedicated `xdj-midi-setup` network.
-  - **GPIO MIDI**: Low-latency hardware MIDI IN/OUT via UART.
-- **`esp32-emulator/`**: High-performance native emulator of the ESP32 firmware.
-  - **Web Dashboard**: Modern, responsive CSS Grid interface with real-time WebSocket updates.
-  - **Verification Tools**: Built-in simulators for testing master handoff and stopped-deck scenarios.
-- **24-PPQ MIDI clock** — tight Start / Stop / Clock (0xF8) pulses derived from the DJ master tempo
-- **MIDI CC** — continuous BPM coarse/fine, pitch, bar phase, beat phase, playing state, master deck number
-- **MIDI notes** — beat trigger (every beat) and downbeat trigger (beat 1 of every bar), with velocity accents
-- **Two source modes:**
-  - 1. **Pro DJ Link** — listens on the Ethernet network for CDJ-3000 / XDJ-AZ / XDJ-XZ absolute-position packets (~30 ms) and beat packets; works with any Pioneer standalone hardware
-  - 2. **Ableton Link** — joins the Link session broadcast by rekordbox (Performance mode / USB controller) or any other Link-capable software; polls at ~500 µs for sub-millisecond timing
-- **Network auto discovery** — tries to discover and select the correct network interface automatically
-- **TOML config file** — all MIDI channel, note, and CC numbers are fully remappable
-- **CLI overrides** — interface, MIDI port, source, device number, log level
-- **Terminal UI (TUI)** — real-time dashboard with input devices, BPM/phase, MIDI output status, interactive port selection, and a scrolling log panel (powered by [ratatui](https://ratatui.rs))
 
 ---
+
+### Bridge between Pioneer CDJ/XDJ hardware (Pro DJ Link), Ableton Link and MIDI clock, MTC, CC, and note output.
+
+
 
 ## ✨ Features
 
 ### Pro DJ Link (Ethernet)
-- **Proactive Participation**: Actively joins the ProLink network as a Virtual CDJ (Device #5 default), triggering real hardware to send detailed status updates.
-- **Modern Hardware Support**: Full support for CDJ-3000 and XDJ-AZ absolute position packets and metadata.
-- **Hierarchical Master Tracking**: Intelligent tempo master selection with explicit master flags and playing-state fallbacks.
+- Joins the ProLink network as a Virtual CDJ (device #5 by default).
+- Supports CDJ-3000 and XDJ-AZ absolute-position packets and metadata.
+- Tracks tempo master with explicit master flags and playing-state fallback.
 
 ### Ableton Link
-- **Hybrid "Auto" Mode**: Prioritizes Ableton Link peers when present, falling back to Pro DJ Link hardware automatically when the Link session is empty.
-- **Sub-millisecond Polling**: 500µs polling interval for extremely tight MIDI clock synchronization.
-- **Peer Visibility**: Real-time peer count and tempo synchronization visible in the TUI and logs.
+- Auto mode prefers Link peers when present and falls back to Pro DJ Link.
+- Default polling is 500µs for tight MIDI clock synchronization.
+- Peer count and tempo are visible in the TUI and logs.
 
 ### MIDI Output
-- **24-PPQ Clock**: Stable MIDI Clock (0xF8) pulses with Start/Stop/Continue support.
-- **Rich CC Mapping**: Remappable CCs for BPM (coarse/fine), Pitch (-10%/+10%), Bar Phase, Beat Phase, and Playing state.
-- **Note Triggers**: MIDI Note triggers on every beat and downbeat with velocity accents.
+- Stable MIDI Clock (0xF8) pulses with Start/Stop/Continue support.
+- Remappable CCs for BPM, pitch, bar phase, beat phase, playing state, master deck, and phrase-16.
+- MIDI notes on every beat and on each downbeat.
 
 ---
 
 ## 🚀 Quick Start
 
-### Building the Host (Desktop)
+### Download the release
+1. download the latest release on the right
+2. run it.
+
+---
+
+## ⚙️ Configuration
+
+Settings are managed via `config.toml` for the host and `sdkconfig` for the ESP32. You should be able to just run the app without any changes to these just fine.
+
+```toml
+# config.toml defaults
+source = "auto"       # "auto" | "link" | "prolink"
+device_number = 5      # Virtual CDJ ID
+interface = "auto"    # Network adapter selection
+device_name = "xdj-clock"
+
+[midi]
+output = "auto"       # MIDI port substring match
+clock_enabled = true
+clock_loop_enabled = true
+smoothing_ms = 0       # BPM jitter reduction
+latency_compensation_ms = 0
+# Bar interval for phrase-lock full resync (1 bar = 4 beats).
+phrase_lock_stable_beats = 4
+
+[midi.notes]
+channel = 9
+beat = 36
+downbeat = 37
+phrase_change = 38
+
+[midi.cc]
+channel = 0
+bpm_coarse = 1
+bpm_fine = 33
+pitch = 2
+bar_phase = 3
+beat_phase = 4
+playing = 5
+master_deck = 6
+phrase_16 = 7
+
+[midi.mtc]
+enabled = false
+frame_rate = "25"
+
+[link]
+enabled = false
+quantum = 4.0
+poll_interval_us = 500
+```
+
+---
+
+## Tested hardware
+
+Please help test the software on your decks.
+
+2024–2023
+- ⚪ OMNIS-DUO (2024)
+- ✅ XDJ-AZ (2024)
+- ⚪ OPUS-QUAD (2023)
+- ⚪ DJM-A9 (2023)
+2021–2020
+- ❌ XDJ-RX3 (2021, no PRO LINK)
+- ⚪ CDJ-3000 (2020)
+- ⚪ XDJ-XZ (2020)
+2019–2016
+- ❌ XDJ-RR (2019, no PRO LINK) 
+- ⚪ CDJ-TOUR1 (2016)
+- ⚪ CDJ-2000NXS2 (2016)
+- ⚪ DJM-900NXS2 (2016)
+- ❌ XDJ-RX2 (2017, no PRO LINK)
+- ⚪ XDJ-1000MK2 (2018)
+2015–2013
+- ⚪ XDJ-1000 (2015)
+- ⚪ XDJ-700 (2015)
+- ⚪ XDJ-RX (2015)
+- ⚪ CDJ-2000NXS (2013)
+- ⚪ CDJ-900NXS (2013)
+- ⚪ DJM-2000NXS (2013)
+- ⚪ DJM-900SRT (2013)
+2012–2009
+- ⚪ CDJ-2000 (2009)
+- ⚪ CDJ-900 (2009)
+- ⚪ DJM-2000 (2010)
+- ⚪ DJM-900NXS (2011)
+---
+
+## 🏗 Architecture
+
+The project is a Rust workspace with shared core logic across desktop and embedded targets.
+
+- **`host/`**: Desktop app and shared core library.
+  - Pro DJ Link packet parsing and shared state management.
+  - Real-time TUI with device discovery, BPM/phase, and MIDI port selection.
+  - Ableton Link engine with hybrid auto mode.
+- **`esp32/`**: ESP32 firmware.
+  - WiFi AP setup.
+  - UART MIDI in/out.
+- **`esp32-emulator/`**: Native emulator for the ESP32 firmware.
+  - Web dashboard with WebSocket updates.
+  - Simulators for master handoff and stopped-deck cases.
+
+Core outputs:
+- **24-PPQ MIDI clock** — Start / Stop / Continue + 0xF8 pulses from DJ tempo
+- **MIDI CC** — BPM coarse/fine, pitch, bar phase, beat phase, playing state, master deck, phrase-16
+- **MIDI notes** — beat trigger and downbeat trigger with velocity accents
+- **Source modes** — Pro DJ Link, Ableton Link, or auto
+- **Network auto-discovery** — picks a suitable interface automatically
+- **TOML config** — remappable MIDI channel, note, and CC numbers
+- **CLI overrides** — interface, MIDI port, source, device number, log level
+- **TUI** — live status, port selection, and logging via [ratatui](https://ratatui.rs)
+
+---
+
+## Slow  Start 
+### Compile the Host (Desktop)
 1.  **Vendor Setup**: Ableton Link support requires vendoring `rusty_link`.
     ```sh
     mkdir -p vendor
@@ -82,44 +180,14 @@ Open `http://localhost:8080` to view the responsive WebSocket dashboard.
 
 ---
 
-## ⚙️ Configuration
-
-Settings are managed via `config.toml` for the host and `sdkconfig` for the ESP32.
-
-```toml
-# config.toml defaults
-source = "auto"       # "auto" | "link" | "prolink"
-device_number = 5     # Virtual CDJ ID
-interface = "auto"    # Network adapter selection
-
-[midi]
-output = "auto"       # MIDI port substring match
-clock_enabled = true
-clock_loop_enabled = true
-smoothing_ms = 0      # BPM jitter reduction
-latency_compensation_ms = 0
-phrase_lock_stable_beats = 4
-
-[midi.mtc]
-enabled = false
-frame_rate = "25"
-
-[link]
-enabled = false
-quantum = 4.0
-poll_interval_us = 500
-```
-
----
-
 ## 🛠 Project State (v1.2.9)
-- **v1.1.0**: Migrated emulator to WebSockets.
-- **v1.1.2**: Implemented proactive Pro DJ Link participation (Keep-alives + Unicasts).
-- **v1.1.4**: Fixed master handoff and play-state latching/timeouts.
-- **v1.1.7**: Restored Ableton Link with critical dangling-pointer fixes in `rusty_link`.
-- **v1.2.9**: Tightened MIDI clock/MTC scheduling and pitch-correct beat timing semantics.
+- v1.1.0: Migrated emulator to WebSockets.
+- v1.1.2: Added proactive Pro DJ Link participation.
+- v1.1.4: Fixed master handoff and play-state latching.
+- v1.1.7: Restored Ableton Link after `rusty_link` fixes.
+- v1.2.9: Tightened MIDI clock/MTC scheduling and pitch-correct beat timing.
 
 ---
 
 ## 📜 License
-**Proprietary** — All rights reserved. Uses components licensed under MIT and GPL-2.0-or-later (Ableton Link).
+All rights reserved. Uses components licensed under MIT and GPL-2.0-or-later (Ableton Link).

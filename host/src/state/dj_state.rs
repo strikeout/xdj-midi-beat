@@ -5,8 +5,8 @@ use std::time::Instant;
 use parking_lot::RwLock;
 
 use crate::config::Source;
-use crate::prolink::BEAT_NONE;
 use crate::prolink::packets::{AbsPositionPacket, BeatPacket, CdjStatus, MixerStatus};
+use crate::prolink::BEAT_NONE;
 
 use super::beat_source::BeatSource;
 use super::device::{DeviceState, MasterState};
@@ -274,7 +274,8 @@ impl DjState {
                 let beat_dur_ms = 60_000.0 / bp.effective_bpm;
                 let time_into_beat = (beat_dur_ms - bp.next_beat_ms as f64).clamp(0.0, beat_dur_ms);
                 dev.beat_phase = (time_into_beat / beat_dur_ms).clamp(0.0, 1.0);
-                dev.bar_phase = ((dev.phrase_16_beat as f64 + dev.beat_phase) / 16.0).clamp(0.0, 1.0);
+                dev.bar_phase =
+                    ((dev.phrase_16_beat as f64 + dev.beat_phase) / 16.0).clamp(0.0, 1.0);
             } else {
                 // End-of-track/unknown upcoming beat sentinel must not propagate stale phase.
                 dev.beat_phase = 0.0;
@@ -479,15 +480,14 @@ impl DjState {
             phrase_16_beat: 0,
         };
 
-        self.timing
-            .observe(TimingMeasurement::from_link(
-                bpm,
-                beat_in_bar,
-                bar_phase,
-                beat_phase,
-                is_playing,
-                received_at,
-            ));
+        self.timing.observe(TimingMeasurement::from_link(
+            bpm,
+            beat_in_bar,
+            bar_phase,
+            beat_phase,
+            is_playing,
+            received_at,
+        ));
         self.last_link_master = Some(link_master.clone());
 
         // Bounded ingest TRACE (beat crossings and/or at most 1Hz), regardless of

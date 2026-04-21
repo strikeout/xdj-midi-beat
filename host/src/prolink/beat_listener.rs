@@ -47,10 +47,7 @@ pub enum BeatEvent {
 
 // ── Listener task ─────────────────────────────────────────────────────────────
 
-pub async fn run(
-    _bind_ip: Ipv4Addr,
-    tx: broadcast::Sender<BeatEvent>,
-) -> anyhow::Result<()> {
+pub async fn run(_bind_ip: Ipv4Addr, tx: broadcast::Sender<BeatEvent>) -> anyhow::Result<()> {
     let raw = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
     raw.set_reuse_address(true)?;
     #[cfg(not(windows))]

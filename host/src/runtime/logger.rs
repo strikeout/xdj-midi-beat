@@ -1,8 +1,8 @@
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
-use crate::prolink::discovery::DeviceEvent;
 use super::TaskContext;
+use crate::prolink::discovery::DeviceEvent;
 
 pub fn spawn(ctx: TaskContext, device_rx: broadcast::Receiver<DeviceEvent>) {
     let dj_state = Arc::clone(&ctx.dj_state);

@@ -3,11 +3,11 @@
 //! Protocol constants and math helpers are shared via `xdj_core_prolink`.
 //! Listener tasks, packet builders, and metadata fetching remain host-specific.
 
-pub mod discovery;
-pub mod packets;
-pub mod builder;
 pub mod beat_listener;
+pub mod builder;
+pub mod discovery;
 pub mod metadata;
+pub mod packets;
 pub mod status_listener;
 pub mod virtual_cdj;
 

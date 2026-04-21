@@ -16,11 +16,11 @@ use parking_lot::Mutex;
 use tokio::sync::broadcast;
 use tokio::sync::watch;
 
-use crate::midi::MidiTransport;
 use crate::config::SharedConfig;
+use crate::midi::MidiTransport;
 use crate::prolink::beat_listener::BeatEvent;
+use crate::state::timing::{TimingMeasurement, TimingSnapshot, TimingSource};
 use crate::state::{BeatSource, SharedState};
-use crate::state::timing::{MeasurementKind, TimingMeasurement, TimingSnapshot, TimingSource};
 use crate::tui::state::MidiActivity;
 
 // ── MIDI byte constants ───────────────────────────────────────────────────────
@@ -50,14 +50,18 @@ struct ClockState {
     last_bpm: f64,
     /// Whether we're waiting for a downbeat (beat 1) before starting.
     waiting_for_downbeat: bool,
-    /// Beat counter for phrase sync (resync every 16 beats).
+    /// Phrase beat counter used for status/UI updates.
     beat_count: u8,
     /// Beats observed while waiting for phrase start.
     wait_beats_seen: u8,
     /// Last timing measurement timestamp processed from shared timing model.
     last_timing_received_at: Option<Instant>,
-    /// Beat edges since the last phase/bar realignment.
-    beats_since_realign: u8,
+    /// Last observed beat-in-bar from timing snapshots (for edge detection).
+    last_timing_beat_in_bar: Option<u8>,
+    /// Downbeat edges since the last bar-based realignment.
+    bars_since_realign: u8,
+    /// Optional active phase resync slew used when smoothing is enabled.
+    phase_slew: Option<PhaseSlew>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,6 +69,14 @@ enum ClockTransportState {
     Idle,
     WaitingForDownbeat { wait_beats_seen: u8 },
     Running,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PhaseSlew {
+    started_at: Instant,
+    duration: Duration,
+    total_correction_ns: i128,
+    applied_correction_ns: i128,
 }
 
 impl ClockState {
@@ -80,7 +92,9 @@ impl ClockState {
             beat_count: 0,
             wait_beats_seen: 0,
             last_timing_received_at: None,
-            beats_since_realign: 0,
+            last_timing_beat_in_bar: None,
+            bars_since_realign: 0,
+            phase_slew: None,
         }
     }
 
@@ -114,19 +128,25 @@ impl ClockState {
                 self.running = false;
                 self.waiting_for_downbeat = false;
                 self.wait_beats_seen = 0;
-                self.beats_since_realign = 0;
+                self.last_timing_beat_in_bar = None;
+                self.bars_since_realign = 0;
+                self.phase_slew = None;
             }
             ClockTransportState::WaitingForDownbeat { wait_beats_seen } => {
                 self.running = false;
                 self.waiting_for_downbeat = true;
                 self.wait_beats_seen = wait_beats_seen;
-                self.beats_since_realign = 0;
+                self.last_timing_beat_in_bar = None;
+                self.bars_since_realign = 0;
+                self.phase_slew = None;
             }
             ClockTransportState::Running => {
                 self.running = true;
                 self.waiting_for_downbeat = false;
                 self.wait_beats_seen = 0;
-                self.beats_since_realign = 0;
+                self.last_timing_beat_in_bar = None;
+                self.bars_since_realign = 0;
+                self.phase_slew = None;
             }
         }
     }
@@ -151,6 +171,14 @@ fn signed_delta_ms(a: Instant, b: Instant) -> f64 {
         a.duration_since(b).as_secs_f64() * 1000.0
     } else {
         -(b.duration_since(a).as_secs_f64() * 1000.0)
+    }
+}
+
+fn signed_delta_ns(a: Instant, b: Instant) -> i128 {
+    if a >= b {
+        a.duration_since(b).as_nanos() as i128
+    } else {
+        -((b.duration_since(a).as_nanos()) as i128)
     }
 }
 
@@ -180,12 +208,28 @@ fn measurement_matches_master(
         TimingSource::AbletonLink => master_source == Some(BeatSource::AbletonLink),
         TimingSource::ProLink => {
             master_source != Some(BeatSource::AbletonLink)
-                && (master_device_number == 0 || measurement.device_number == Some(master_device_number))
+                && (master_device_number == 0
+                    || measurement.device_number == Some(master_device_number))
         }
     }
 }
 
-fn beat_at_from_measurement(_cs: &ClockState, now: Instant, measurement: &TimingMeasurement) -> Option<Instant> {
+fn timing_snapshot_beat_edge(cs: &mut ClockState, measurement: &TimingMeasurement) -> bool {
+    let Some(beat_in_bar) = measurement.beat_in_bar else {
+        cs.last_timing_beat_in_bar = None;
+        return false;
+    };
+
+    let edge = cs.last_timing_beat_in_bar != Some(beat_in_bar);
+    cs.last_timing_beat_in_bar = Some(beat_in_bar);
+    edge
+}
+
+fn beat_at_from_measurement(
+    _cs: &ClockState,
+    now: Instant,
+    measurement: &TimingMeasurement,
+) -> Option<Instant> {
     let beat_phase = measurement.beat_phase?;
     if measurement.effective_bpm <= 0.0 {
         return None;
@@ -206,7 +250,8 @@ fn handle_timing_snapshot(
     state: &SharedState,
     midi: &Arc<dyn MidiTransport>,
     activity: &Arc<Mutex<MidiActivity>>,
-    realign_interval_beats: u8,
+    resync_interval_bars: u8,
+    smoothing_ms: u64,
     now: Instant,
 ) {
     let (master, snapshot) = {
@@ -247,17 +292,19 @@ fn handle_timing_snapshot(
     };
 
     let beat_in_bar = measurement.beat_in_bar.unwrap_or(master.beat_in_bar);
-    let is_beat_edge = matches!(measurement.kind, MeasurementKind::ProLinkBeatPacket);
+    let is_beat_edge = timing_snapshot_beat_edge(cs, &measurement);
 
-    if matches!(cs.transport_state(), ClockTransportState::WaitingForDownbeat { .. }) {
-        if is_beat_edge && beat_in_bar == 1
-        {
+    if matches!(
+        cs.transport_state(),
+        ClockTransportState::WaitingForDownbeat { .. }
+    ) {
+        if is_beat_edge && beat_in_bar == 1 {
             cs.wait_beats_seen = cs.wait_beats_seen.saturating_add(1);
-            let fallback_start = cs.wait_beats_seen >= realign_interval_beats.max(1);
+            let fallback_start = cs.wait_beats_seen >= resync_interval_bars.max(1);
             if phrase_beat == 1 || fallback_start {
                 cs.transition_to_running();
                 cs.beat_count = 1;
-                cs.beats_since_realign = 0;
+                cs.bars_since_realign = 0;
                 cs.has_started = true;
                 let _ = midi.send_message(&[MSG_START]);
                 let _ = midi.send_message(&[MSG_CLOCK]);
@@ -279,61 +326,127 @@ fn handle_timing_snapshot(
             }
         }
     } else if cs.running && is_beat_edge {
-        cs.beats_since_realign = cs.beats_since_realign.saturating_add(1);
-        let realign_interval = realign_interval_beats.max(1);
-        if cs.beats_since_realign >= realign_interval {
-            if let Some(beat_at) = beat_at_from_measurement(cs, now, &measurement) {
-                apply_phase_correction(cs, beat_at);
-            }
-            cs.beats_since_realign = 0;
+        if let Some(beat_at) = beat_at_from_measurement(cs, now, &measurement) {
+            maybe_resync_on_bar_boundary(
+                cs,
+                midi,
+                activity,
+                resync_interval_bars,
+                smoothing_ms,
+                beat_in_bar,
+                beat_at,
+            );
         }
         cs.beat_count = phrase_beat as u8;
     }
 }
 
-// ── Phase correction ──────────────────────────────────────────────────────────
+fn apply_pending_phase_slew(cs: &mut ClockState, now: Instant) {
+    let Some(mut slew) = cs.phase_slew else {
+        return;
+    };
 
-/// Maximum correction we will apply in one shot (3/4 of a pulse interval).
-const MAX_CORRECTION_FRACTION: f64 = 0.75;
-
-/// When a beat arrives, compute how far off our clock is and nudge `last_pulse`
-/// to correct it.  We correct by at most MAX_CORRECTION_FRACTION of an
-/// interval to avoid audible jumps.
-fn apply_phase_correction(cs: &mut ClockState, beat_at: Instant) {
-    if cs.interval_ns == 0 {
+    let elapsed = now
+        .checked_duration_since(slew.started_at)
+        .unwrap_or(Duration::ZERO)
+        .min(slew.duration);
+    let elapsed_ns = elapsed.as_nanos() as i128;
+    let duration_ns = slew.duration.as_nanos() as i128;
+    if duration_ns <= 0 {
+        cs.phase_slew = None;
         return;
     }
 
-    // Error of beat relative to nearest pulse boundary in [-interval/2, +interval/2].
-    let interval = cs.interval_ns as i128;
-    let elapsed_ns = beat_at.saturating_duration_since(cs.last_pulse).as_nanos() as i128;
-    let remainder = elapsed_ns.rem_euclid(interval);
-    let signed_error_ns = if remainder > interval / 2 {
-        remainder - interval
-    } else {
-        remainder
-    };
-
-    // Bounded correction avoids audible jumps but keeps long-run phase locked.
-    let max_corr_ns = (interval as f64 * MAX_CORRECTION_FRACTION).round() as i128;
-    let correction_ns = signed_error_ns.clamp(-max_corr_ns, max_corr_ns);
-
-    if correction_ns > 0 {
-        cs.last_pulse += Duration::from_nanos(correction_ns as u64);
-    } else if correction_ns < 0 {
-        let back = Duration::from_nanos((-correction_ns) as u64);
+    let target_correction_ns = (slew.total_correction_ns * elapsed_ns) / duration_ns;
+    let delta_ns = target_correction_ns - slew.applied_correction_ns;
+    if delta_ns > 0 {
+        cs.last_pulse += Duration::from_nanos(delta_ns as u64);
+    } else if delta_ns < 0 {
+        let back = Duration::from_nanos((-delta_ns) as u64);
         cs.last_pulse = cs.last_pulse.checked_sub(back).unwrap_or(cs.last_pulse);
     }
+    slew.applied_correction_ns = target_correction_ns;
 
-    tracing::trace!(
-        target: "midi.clock",
-        error_ns = signed_error_ns,
-        correction_ns,
-        interval_ns = cs.interval_ns,
-        "Applied bounded phase correction"
-    );
+    if elapsed >= slew.duration {
+        cs.phase_slew = None;
+        cs.pulse_index = 0;
+    } else {
+        cs.phase_slew = Some(slew);
+    }
+}
 
+fn apply_full_bar_resync_hard(
+    cs: &mut ClockState,
+    midi: &Arc<dyn MidiTransport>,
+    activity: &Arc<Mutex<MidiActivity>>,
+    beat_at: Instant,
+) {
+    cs.phase_slew = None;
+    let _ = midi.send_message(&[MSG_STOP]);
+    let _ = midi.send_message(&[MSG_START]);
+    let _ = midi.send_message(&[MSG_CLOCK]);
+    cs.running = true;
+    cs.waiting_for_downbeat = false;
+    cs.wait_beats_seen = 0;
+    cs.has_started = true;
     cs.pulse_index = 0;
+    cs.last_pulse = beat_at;
+
+    if let Some(mut a) = activity.try_lock() {
+        a.clock_last_start_at = Some(Instant::now());
+        a.clock_pulses += 1;
+        a.clock_last_pulse_at = Some(Instant::now());
+        a.clock_running = true;
+        a.clock_waiting_for_phrase = false;
+        a.clock_wait_beats_seen = 0;
+        a.clock_phrase_beat = cs.beat_count;
+        a.clock_pulse_index = cs.pulse_index;
+    }
+}
+
+fn start_full_bar_resync_slewed(cs: &mut ClockState, beat_at: Instant, smoothing_ms: u64) {
+    apply_pending_phase_slew(cs, beat_at);
+    let correction_ns = signed_delta_ns(beat_at, cs.last_pulse);
+    if correction_ns == 0 {
+        cs.phase_slew = None;
+        cs.pulse_index = 0;
+        return;
+    }
+
+    let duration = Duration::from_millis(smoothing_ms.max(1));
+    cs.phase_slew = Some(PhaseSlew {
+        started_at: beat_at,
+        duration,
+        total_correction_ns: correction_ns,
+        applied_correction_ns: 0,
+    });
+}
+
+fn maybe_resync_on_bar_boundary(
+    cs: &mut ClockState,
+    midi: &Arc<dyn MidiTransport>,
+    activity: &Arc<Mutex<MidiActivity>>,
+    resync_interval_bars: u8,
+    smoothing_ms: u64,
+    beat_in_bar: u8,
+    beat_at: Instant,
+) {
+    if beat_in_bar != 1 {
+        return;
+    }
+
+    cs.bars_since_realign = cs.bars_since_realign.saturating_add(1);
+    let interval = resync_interval_bars.max(1);
+    if cs.bars_since_realign < interval {
+        return;
+    }
+
+    if smoothing_ms == 0 {
+        apply_full_bar_resync_hard(cs, midi, activity, beat_at);
+    } else {
+        start_full_bar_resync_slewed(cs, beat_at, smoothing_ms);
+    }
+    cs.bars_since_realign = 0;
 }
 
 // ── Beat event handler ────────────────────────────────────────────────────────
@@ -345,7 +458,8 @@ fn handle_beat_event(
     state: &SharedState,
     midi: &Arc<dyn MidiTransport>,
     activity: &Arc<Mutex<MidiActivity>>,
-    realign_interval_beats: u8,
+    resync_interval_bars: u8,
+    smoothing_ms: u64,
     evt: BeatEvent,
 ) {
     let source = state.read().master.source;
@@ -384,15 +498,18 @@ fn handle_beat_event(
                 let is_phrase_start = phrase_beat == 1 && bp.beat_in_bar == 1;
 
                 if cs.waiting_for_downbeat {
-                    cs.wait_beats_seen = cs.wait_beats_seen.saturating_add(1);
-                let fallback_start = cs.wait_beats_seen >= realign_interval_beats.max(1) && bp.beat_in_bar == 1;
-                if is_phrase_start || fallback_start {
-                    cs.transition_to_running();
-                    cs.beat_count = 1;
-                    cs.beats_since_realign = 0;
-                    cs.has_started = true;
-                    let _ = midi.send_message(&[MSG_START]);
-                    let _ = midi.send_message(&[MSG_CLOCK]);
+                    if bp.beat_in_bar == 1 {
+                        cs.wait_beats_seen = cs.wait_beats_seen.saturating_add(1);
+                    }
+                    let fallback_start =
+                        cs.wait_beats_seen >= resync_interval_bars.max(1) && bp.beat_in_bar == 1;
+                    if is_phrase_start || fallback_start {
+                        cs.transition_to_running();
+                        cs.beat_count = 1;
+                        cs.bars_since_realign = 0;
+                        cs.has_started = true;
+                        let _ = midi.send_message(&[MSG_START]);
+                        let _ = midi.send_message(&[MSG_CLOCK]);
                         {
                             if let Some(mut a) = activity.try_lock() {
                                 a.clock_last_start_at = Some(Instant::now());
@@ -410,12 +527,15 @@ fn handle_beat_event(
                         cs.last_pulse = Instant::now();
                     }
                 } else if cs.running {
-                    cs.beats_since_realign = cs.beats_since_realign.saturating_add(1);
-                    let realign_interval = realign_interval_beats.max(1);
-                    if cs.beats_since_realign >= realign_interval {
-                        apply_phase_correction(cs, received_at);
-                        cs.beats_since_realign = 0;
-                    }
+                    maybe_resync_on_bar_boundary(
+                        cs,
+                        midi,
+                        activity,
+                        resync_interval_bars,
+                        smoothing_ms,
+                        bp.beat_in_bar,
+                        received_at,
+                    );
                     cs.beat_count = phrase_beat as u8;
                 }
             }
@@ -464,44 +584,49 @@ fn handle_beat_event(
             let is_phrase_start = phrase_beat == 1 && beat_in_bar == 1;
 
             if cs.waiting_for_downbeat {
-                cs.wait_beats_seen = cs.wait_beats_seen.saturating_add(1);
-                let fallback_start = cs.wait_beats_seen >= realign_interval_beats.max(1) && beat_in_bar == 1;
+                if beat_in_bar == 1 {
+                    cs.wait_beats_seen = cs.wait_beats_seen.saturating_add(1);
+                }
+                let fallback_start =
+                    cs.wait_beats_seen >= resync_interval_bars.max(1) && beat_in_bar == 1;
                 if is_phrase_start || fallback_start {
                     cs.transition_to_running();
                     cs.beat_count = 1;
-                    cs.beats_since_realign = 0;
+                    cs.bars_since_realign = 0;
                     cs.has_started = true;
                     let _ = midi.send_message(&[MSG_START]);
                     let _ = midi.send_message(&[MSG_CLOCK]);
-                        {
-                            if let Some(mut a) = activity.try_lock() {
-                                a.clock_last_start_at = Some(Instant::now());
-                                a.clock_pulses += 1;
-                                a.clock_last_pulse_at = Some(Instant::now());
-                                a.clock_running = true;
-                                a.clock_waiting_for_phrase = false;
-                                a.clock_wait_beats_seen = 0;
-                                a.clock_phrase_beat = cs.beat_count;
-                                a.clock_pulse_index = cs.pulse_index;
-                                a.clock_timing_delta_ms = beat_timing_delta_ms(&cs, Instant::now());
-                            }
+                    {
+                        if let Some(mut a) = activity.try_lock() {
+                            a.clock_last_start_at = Some(Instant::now());
+                            a.clock_pulses += 1;
+                            a.clock_last_pulse_at = Some(Instant::now());
+                            a.clock_running = true;
+                            a.clock_waiting_for_phrase = false;
+                            a.clock_wait_beats_seen = 0;
+                            a.clock_phrase_beat = cs.beat_count;
+                            a.clock_pulse_index = cs.pulse_index;
+                            a.clock_timing_delta_ms = beat_timing_delta_ms(&cs, Instant::now());
                         }
+                    }
                     cs.pulse_index = 0;
                     cs.last_pulse = Instant::now();
                 }
-                } else if cs.running {
-                    cs.beats_since_realign = cs.beats_since_realign.saturating_add(1);
-                    let realign_interval = realign_interval_beats.max(1);
-                    if cs.beats_since_realign >= realign_interval {
-                        apply_phase_correction(cs, received_at);
-                        cs.beats_since_realign = 0;
-                    }
-                    cs.beat_count = phrase_beat as u8;
-                }
+            } else if cs.running {
+                maybe_resync_on_bar_boundary(
+                    cs,
+                    midi,
+                    activity,
+                    resync_interval_bars,
+                    smoothing_ms,
+                    beat_in_bar,
+                    received_at,
+                );
+                cs.beat_count = phrase_beat as u8;
+            }
         }
     }
 }
-
 
 /// Drain all queued beat events without blocking.
 #[allow(dead_code)]
@@ -510,12 +635,21 @@ fn drain_beat_events(
     state: &SharedState,
     midi: &Arc<dyn MidiTransport>,
     activity: &Arc<Mutex<MidiActivity>>,
-    realign_interval_beats: u8,
+    resync_interval_bars: u8,
+    smoothing_ms: u64,
     beat_rx: &mut broadcast::Receiver<BeatEvent>,
 ) {
     loop {
         match beat_rx.try_recv() {
-            Ok(evt) => handle_beat_event(cs, state, midi, activity, realign_interval_beats, evt),
+            Ok(evt) => handle_beat_event(
+                cs,
+                state,
+                midi,
+                activity,
+                resync_interval_bars,
+                smoothing_ms,
+                evt,
+            ),
             Err(_) => break,
         }
     }
@@ -571,10 +705,15 @@ fn handle_prolink_beat_loop_disabled(
     state: &SharedState,
     midi: &Arc<dyn MidiTransport>,
     activity: &Arc<Mutex<MidiActivity>>,
-    realign_interval_beats: u8,
+    resync_interval_bars: u8,
+    smoothing_ms: u64,
     evt: BeatEvent,
 ) {
-    let BeatEvent::Beat { packet: bp, received_at } = evt else {
+    let BeatEvent::Beat {
+        packet: bp,
+        received_at,
+    } = evt
+    else {
         return;
     };
 
@@ -591,13 +730,17 @@ fn handle_prolink_beat_loop_disabled(
     }
 
     cs.set_bpm(bp.effective_bpm);
-    let resync_every = realign_interval_beats.max(1);
-
     if cs.running {
         cs.beat_count = cs.beat_count.wrapping_add(1).max(1);
-        if cs.beat_count % resync_every == 0 {
-            apply_phase_correction(cs, received_at);
-        }
+        maybe_resync_on_bar_boundary(
+            cs,
+            midi,
+            activity,
+            resync_interval_bars,
+            smoothing_ms,
+            bp.beat_in_bar,
+            received_at,
+        );
 
         if let Some(mut a) = activity.try_lock() {
             a.clock_running = true;
@@ -612,7 +755,11 @@ fn handle_prolink_beat_loop_disabled(
         cs.pulse_index = 0;
         cs.last_pulse = received_at;
         cs.beat_count = 1;
-        let msg = if cs.has_started { MSG_CONTINUE } else { MSG_START };
+        let msg = if cs.has_started {
+            MSG_CONTINUE
+        } else {
+            MSG_START
+        };
         cs.has_started = true;
         let _ = midi.send_message(&[msg]);
         let _ = midi.send_message(&[MSG_CLOCK]);
@@ -759,6 +906,8 @@ pub async fn run(
             let _ = cfg_change_rx.borrow_and_update();
         }
 
+        apply_pending_phase_slew(&mut cs, Instant::now());
+
         // ── Compute next pulse deadline ──────────────────────────────────────
         let latency_offset_ms = cfg.read().midi.latency_compensation_ms;
         let next_pulse_at = if clock_enabled && cs.running && cs.interval_ns > 0 {
@@ -788,21 +937,34 @@ pub async fn run(
             }
             changed = timing_rx.changed() => {
                 if changed.is_ok() && clock_loop_enabled {
-                    let stable_beats = cfg.read().midi.phrase_lock_stable_beats;
-                    handle_timing_snapshot(&mut cs, &state, &midi, &activity, stable_beats, Instant::now());
+                    let cfg_r = cfg.read();
+                    let stable_bars = cfg_r.midi.phrase_lock_stable_beats;
+                    let smoothing_ms = cfg_r.midi.smoothing_ms;
+                    handle_timing_snapshot(
+                        &mut cs,
+                        &state,
+                        &midi,
+                        &activity,
+                        stable_bars,
+                        smoothing_ms,
+                        Instant::now(),
+                    );
                 }
             }
             evt = beat_rx.recv() => {
                 match evt {
                     Ok(evt) => {
                         if clock_enabled && !clock_loop_enabled {
-                            let stable_beats = cfg.read().midi.phrase_lock_stable_beats;
+                            let cfg_r = cfg.read();
+                            let stable_bars = cfg_r.midi.phrase_lock_stable_beats;
+                            let smoothing_ms = cfg_r.midi.smoothing_ms;
                             handle_prolink_beat_loop_disabled(
                                 &mut cs,
                                 &state,
                                 &midi,
                                 &activity,
-                                stable_beats,
+                                stable_bars,
+                                smoothing_ms,
                                 evt,
                             );
                         }
@@ -829,7 +991,11 @@ pub async fn run(
                 if bpm > 0.0 {
                     cs.set_bpm(bpm);
                 }
-                let msg = if cs.has_started { MSG_CONTINUE } else { MSG_START };
+                let msg = if cs.has_started {
+                    MSG_CONTINUE
+                } else {
+                    MSG_START
+                };
                 cs.has_started = true;
                 // Send Start/Continue followed by the first clock pulse
                 // immediately (MIDI spec: clock should follow Start without delay).
@@ -849,7 +1015,14 @@ pub async fn run(
                         }
                     }
                 }
-                tracing::debug!(msg = if msg == MSG_START { "Start" } else { "Continue" }, "MIDI transport sent");
+                tracing::debug!(
+                    msg = if msg == MSG_START {
+                        "Start"
+                    } else {
+                        "Continue"
+                    },
+                    "MIDI transport sent"
+                );
             } else if (!clock_enabled || !is_playing) && cs.running {
                 cs.transition_to_idle();
                 let _ = midi.send_message(&[MSG_STOP]);
@@ -863,7 +1036,11 @@ pub async fn run(
 
         // ── Emit clock pulse if deadline reached ─────────────────────────────
         let pulse_bpm = if clock_loop_enabled {
-            if bpm > 0.0 { bpm } else { cs.last_bpm }
+            if bpm > 0.0 {
+                bpm
+            } else {
+                cs.last_bpm
+            }
         } else {
             cs.last_bpm
         };
@@ -890,8 +1067,8 @@ pub async fn run(
 mod tests {
     use super::*;
     use crate::midi::test_utils::MockMidiTransport;
-    use crate::state::BeatSource;
     use crate::state::timing::{MeasurementKind, PlayingState, TimingMeasurement, TimingSource};
+    use crate::state::BeatSource;
     use parking_lot::Mutex;
     use std::sync::Arc;
     use std::time::Duration;
@@ -952,7 +1129,7 @@ mod tests {
         let activity = Arc::new(Mutex::new(MidiActivity::default()));
         let state = make_test_state(1, BeatSource::ProLink);
 
-        handle_beat_event(&mut cs, &state, &midi, &activity, 1, make_beat(1, 1));
+        handle_beat_event(&mut cs, &state, &midi, &activity, 1, 0, make_beat(1, 1));
 
         assert!(cs.running);
         assert!(cs.has_started);
@@ -965,7 +1142,7 @@ mod tests {
         let activity = Arc::new(Mutex::new(MidiActivity::default()));
         let state = make_test_state(1, BeatSource::ProLink);
 
-        handle_beat_event(&mut cs, &state, &midi, &activity, 1, make_beat(2, 1));
+        handle_beat_event(&mut cs, &state, &midi, &activity, 1, 0, make_beat(2, 1));
 
         assert!(!cs.running);
     }
@@ -977,7 +1154,7 @@ mod tests {
         let activity = Arc::new(Mutex::new(MidiActivity::default()));
         let state = make_test_state(0, BeatSource::ProLink);
 
-        handle_beat_event(&mut cs, &state, &midi, &activity, 1, make_beat(5, 1));
+        handle_beat_event(&mut cs, &state, &midi, &activity, 1, 0, make_beat(5, 1));
 
         assert!(cs.running);
     }
@@ -987,18 +1164,18 @@ mod tests {
         let mut cs = ClockState::new();
         let midi: Arc<dyn MidiTransport> = Arc::new(MockMidiTransport::new());
         let activity = Arc::new(Mutex::new(MidiActivity::default()));
-        
+
         // Create state with phrase at beat 2 (not start of phrase)
         let mut state = crate::state::DjState::new(30);
         state.master.device_number = 1;
         state.master.source = Some(BeatSource::ProLink);
         state.master.bpm = 120.0;
         state.master.is_playing = true;
-        state.master.phrase_16_beat = 2;  // Not start of 16-beat phrase
+        state.master.phrase_16_beat = 2; // Not start of 16-beat phrase
         state.master.beat_in_bar = 2;
         let state = Arc::new(parking_lot::RwLock::new(state));
 
-        handle_beat_event(&mut cs, &state, &midi, &activity, 1, make_beat(1, 2));
+        handle_beat_event(&mut cs, &state, &midi, &activity, 1, 0, make_beat(1, 2));
 
         assert!(!cs.running);
         assert!(cs.waiting_for_downbeat);
@@ -1018,7 +1195,7 @@ mod tests {
             beat_phase: 0.0,
             received_at: Instant::now(),
         };
-        handle_beat_event(&mut cs, &state, &midi, &activity, 1, evt);
+        handle_beat_event(&mut cs, &state, &midi, &activity, 1, 0, evt);
 
         assert!(cs.running);
     }
@@ -1037,7 +1214,7 @@ mod tests {
             beat_phase: 0.0,
             received_at: Instant::now(),
         };
-        handle_beat_event(&mut cs, &state, &midi, &activity, 1, evt);
+        handle_beat_event(&mut cs, &state, &midi, &activity, 1, 0, evt);
 
         assert!(!cs.running);
     }
@@ -1070,7 +1247,9 @@ mod tests {
         cs.running = true;
         cs.pulse_index = 22;
         let overdue = Duration::from_nanos(cs.interval_ns.saturating_mul(3).saturating_add(1));
-        cs.last_pulse = Instant::now().checked_sub(overdue).unwrap_or(Instant::now());
+        cs.last_pulse = Instant::now()
+            .checked_sub(overdue)
+            .unwrap_or(Instant::now());
 
         let midi = Arc::new(MockMidiTransport::new());
         let transport: Arc<dyn MidiTransport> = midi.clone();
@@ -1092,7 +1271,15 @@ mod tests {
         let activity = Arc::new(Mutex::new(MidiActivity::default()));
         let state = make_test_state(1, BeatSource::ProLink);
 
-        handle_beat_event(&mut cs, &state, &transport, &activity, 1, make_beat(1, 1));
+        handle_beat_event(
+            &mut cs,
+            &state,
+            &transport,
+            &activity,
+            1,
+            0,
+            make_beat(1, 1),
+        );
 
         let msgs = midi.get_messages();
         assert_eq!(msgs.len(), 2);
@@ -1117,6 +1304,7 @@ mod tests {
             &transport,
             &activity,
             4,
+            0,
             make_beat_at(1, 4, Instant::now()),
         );
 
@@ -1138,7 +1326,7 @@ mod tests {
 
         let measurement = make_timing_measurement(1, 1);
         state.write().timing.observe(measurement);
-        handle_timing_snapshot(&mut cs, &state, &transport, &activity, 1, Instant::now());
+        handle_timing_snapshot(&mut cs, &state, &transport, &activity, 1, 0, Instant::now());
 
         let msgs = midi.get_messages();
         assert_eq!(msgs.len(), 2);
@@ -1147,7 +1335,7 @@ mod tests {
     }
 
     #[test]
-    fn timing_snapshot_realigns_only_at_configured_interval() {
+    fn timing_snapshot_realigns_only_at_configured_bar_interval() {
         let mut cs = ClockState::new();
         cs.transition_to_running();
         cs.pulse_index = 9;
@@ -1159,17 +1347,19 @@ mod tests {
         let activity = Arc::new(Mutex::new(MidiActivity::default()));
         let state = make_test_state(1, BeatSource::ProLink);
 
-        for _ in 0..3 {
-            let measurement = make_timing_measurement(1, 2);
-            state.write().timing.observe(measurement.clone());
-            handle_timing_snapshot(&mut cs, &state, &midi, &activity, 4, Instant::now());
-            assert_eq!(cs.pulse_index, 9);
-            std::thread::sleep(Duration::from_millis(1));
+        for _bar in 0..3 {
+            for beat_in_bar in 1..=4 {
+                let measurement = make_timing_measurement(1, beat_in_bar);
+                state.write().timing.observe(measurement.clone());
+                handle_timing_snapshot(&mut cs, &state, &midi, &activity, 4, 0, Instant::now());
+                assert_eq!(cs.pulse_index, 9);
+                std::thread::sleep(Duration::from_millis(1));
+            }
         }
 
-        let measurement = make_timing_measurement(1, 2);
+        let measurement = make_timing_measurement(1, 1);
         state.write().timing.observe(measurement.clone());
-        handle_timing_snapshot(&mut cs, &state, &midi, &activity, 4, Instant::now());
+        handle_timing_snapshot(&mut cs, &state, &midi, &activity, 4, 0, Instant::now());
         assert_eq!(cs.pulse_index, 0);
     }
 
@@ -1188,9 +1378,110 @@ mod tests {
 
         let measurement = make_timing_measurement(1, 1);
         state.write().timing.observe(measurement.clone());
-        handle_timing_snapshot(&mut cs, &state, &midi, &activity, 8, Instant::now());
+        handle_timing_snapshot(&mut cs, &state, &midi, &activity, 8, 0, Instant::now());
 
         assert_eq!(cs.pulse_index, 11);
     }
 
+    #[test]
+    fn timing_snapshot_link_downbeat_triggers_bar_resync() {
+        let mut cs = ClockState::new();
+        cs.transition_to_running();
+        cs.has_started = true;
+        cs.pulse_index = 11;
+        cs.last_timing_beat_in_bar = Some(4);
+        let beat_at = Instant::now();
+        cs.last_pulse = beat_at
+            .checked_sub(Duration::from_millis(40))
+            .unwrap_or(beat_at);
+
+        let midi = Arc::new(MockMidiTransport::new());
+        let transport: Arc<dyn MidiTransport> = midi.clone();
+        let activity = Arc::new(Mutex::new(MidiActivity::default()));
+        let state = make_test_state(0, BeatSource::AbletonLink);
+
+        let measurement = TimingMeasurement::from_link(120.0, 1, 0.0, 0.0, true, beat_at);
+        state.write().timing.observe(measurement);
+        handle_timing_snapshot(&mut cs, &state, &transport, &activity, 1, 0, beat_at);
+
+        let msgs = midi.get_messages();
+        assert_eq!(msgs, vec![vec![MSG_STOP], vec![MSG_START], vec![MSG_CLOCK]]);
+        assert_eq!(cs.pulse_index, 0);
+        assert!(cs.running);
+    }
+
+    #[test]
+    fn loop_disabled_resync_hard_restarts_transport_when_smoothing_is_zero() {
+        let mut cs = ClockState::new();
+        cs.transition_to_running();
+        cs.has_started = true;
+        cs.pulse_index = 7;
+
+        let beat_at = Instant::now();
+        cs.last_pulse = beat_at
+            .checked_sub(Duration::from_millis(40))
+            .unwrap_or(beat_at);
+
+        let midi = Arc::new(MockMidiTransport::new());
+        let transport: Arc<dyn MidiTransport> = midi.clone();
+        let activity = Arc::new(Mutex::new(MidiActivity::default()));
+        let state = make_test_state(1, BeatSource::ProLink);
+
+        handle_prolink_beat_loop_disabled(
+            &mut cs,
+            &state,
+            &transport,
+            &activity,
+            1,
+            0,
+            make_beat_at(1, 1, beat_at),
+        );
+
+        let msgs = midi.get_messages();
+        assert_eq!(msgs, vec![vec![MSG_STOP], vec![MSG_START], vec![MSG_CLOCK]]);
+        assert!(cs.running);
+        assert_eq!(cs.pulse_index, 0);
+        assert!(cs.phase_slew.is_none());
+        assert_eq!(cs.last_pulse, beat_at);
+    }
+
+    #[test]
+    fn loop_disabled_resync_smoothed_slews_without_transport_restart() {
+        let mut cs = ClockState::new();
+        cs.transition_to_running();
+        cs.has_started = true;
+        cs.pulse_index = 5;
+
+        let beat_at = Instant::now();
+        cs.last_pulse = beat_at
+            .checked_sub(Duration::from_millis(40))
+            .unwrap_or(beat_at);
+        let pre_slew_last_pulse = cs.last_pulse;
+
+        let midi = Arc::new(MockMidiTransport::new());
+        let transport: Arc<dyn MidiTransport> = midi.clone();
+        let activity = Arc::new(Mutex::new(MidiActivity::default()));
+        let state = make_test_state(1, BeatSource::ProLink);
+
+        handle_prolink_beat_loop_disabled(
+            &mut cs,
+            &state,
+            &transport,
+            &activity,
+            1,
+            200,
+            make_beat_at(1, 1, beat_at),
+        );
+
+        assert!(midi.get_messages().is_empty());
+        assert!(cs.phase_slew.is_some());
+
+        apply_pending_phase_slew(&mut cs, beat_at + Duration::from_millis(100));
+        assert!(cs.last_pulse > pre_slew_last_pulse);
+
+        apply_pending_phase_slew(&mut cs, beat_at + Duration::from_millis(200));
+        assert!(cs.phase_slew.is_none());
+        assert_eq!(cs.pulse_index, 0);
+        assert_eq!(cs.last_pulse, beat_at);
+    }
 }

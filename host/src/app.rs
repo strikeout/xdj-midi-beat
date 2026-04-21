@@ -22,7 +22,7 @@ use crate::config;
 use crate::prolink::discovery::DeviceTable;
 use crate::prolink::{MAGIC, PKT_KEEPALIVE};
 use crate::state::{SharedState, TrackChange};
-use crate::{midi::soak::SoakMode, midi::soak::SoakArgs};
+use crate::{midi::soak::SoakArgs, midi::soak::SoakMode};
 
 // ── CLI ───────────────────────────────────────────────────────────────────────────
 

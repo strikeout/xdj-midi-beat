@@ -19,9 +19,7 @@ use super::builder::{
 };
 use super::discovery::DeviceTable;
 use super::packets::has_magic;
-use super::{
-    PKT_CONFLICT, PORT_DISCOVERY, PORT_STATUS,
-};
+use super::{PKT_CONFLICT, PORT_DISCOVERY, PORT_STATUS};
 
 // ── Timing constants ──────────────────────────────────────────────────────────
 
@@ -221,11 +219,7 @@ pub async fn run(
         //    Real CDJs require this to share detailed metadata and to avoid
         //    "older firmware" warnings (matching prolink-go behaviour).
         {
-            let devices: Vec<[u8; 4]> = device_table
-                .lock()
-                .values()
-                .map(|d| d.ip)
-                .collect();
+            let devices: Vec<[u8; 4]> = device_table.lock().values().map(|d| d.ip).collect();
             for dev_ip in devices {
                 let addr: std::net::SocketAddr =
                     SocketAddrV4::new(Ipv4Addr::from(dev_ip), PORT_STATUS).into();
