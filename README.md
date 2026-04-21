@@ -2,7 +2,7 @@
 
 [![Version](https://img.shields.io/badge/version-1.2.9-blue.svg)](Cargo.toml)
 
-A robust bridge between Pioneer Pro DJ Link (CDJ/XDJ), Ableton Link, and MIDI. Synchronize your DAWs, drum machines, and hardware synths with your DJ setup with sub-millisecond precision.
+Bridge between Pioneer CDJ/XDJ hardware (Pro DJ Link) or rekordbox Performance mode (Ableton Link) and MIDI clock, MTC, CC, and note output. Lets any DMX light setup, DAW, drum machine, or hardware synth stay in sync with your DJ setup. Standalone, highly optimized, uses less than 5 MB of RAM.
 
 ---
 
@@ -20,6 +20,16 @@ The project is structured as a Rust workspace with shared core logic to ensure c
 - **`esp32-emulator/`**: High-performance native emulator of the ESP32 firmware.
   - **Web Dashboard**: Modern, responsive CSS Grid interface with real-time WebSocket updates.
   - **Verification Tools**: Built-in simulators for testing master handoff and stopped-deck scenarios.
+- **24-PPQ MIDI clock** — tight Start / Stop / Clock (0xF8) pulses derived from the DJ master tempo
+- **MIDI CC** — continuous BPM coarse/fine, pitch, bar phase, beat phase, playing state, master deck number
+- **MIDI notes** — beat trigger (every beat) and downbeat trigger (beat 1 of every bar), with velocity accents
+- **Two source modes:**
+  - 1. **Pro DJ Link** — listens on the Ethernet network for CDJ-3000 / XDJ-AZ / XDJ-XZ absolute-position packets (~30 ms) and beat packets; works with any Pioneer standalone hardware
+  - 2. **Ableton Link** — joins the Link session broadcast by rekordbox (Performance mode / USB controller) or any other Link-capable software; polls at ~500 µs for sub-millisecond timing
+- **Network auto discovery** — tries to discover and select the correct network interface automatically
+- **TOML config file** — all MIDI channel, note, and CC numbers are fully remappable
+- **CLI overrides** — interface, MIDI port, source, device number, log level
+- **Terminal UI (TUI)** — real-time dashboard with input devices, BPM/phase, MIDI output status, interactive port selection, and a scrolling log panel (powered by [ratatui](https://ratatui.rs))
 
 ---
 
