@@ -235,7 +235,7 @@ fn log_setting_change(idx: usize, cfg: &crate::config::Config) {
         4 => tracing::info!(enabled = cfg.midi.clock_loop_enabled, "MIDI clock loop setting changed"),
         5 => tracing::info!(smoothing_ms = cfg.midi.smoothing_ms, "BPM smoothing setting changed"),
         6 => tracing::info!(latency_ms = cfg.midi.latency_compensation_ms, "Latency compensation changed"),
-        7 => tracing::info!(beats = cfg.midi.phrase_lock_stable_beats, "Phrase lock stable beats changed"),
+        7 => tracing::info!(beats = cfg.midi.phrase_lock_stable_beats, "Phrase/bar realign interval changed"),
         8 => tracing::info!(channel = cfg.midi.notes.channel + 1, "Note channel changed"),
         9 => tracing::info!(note = cfg.midi.notes.beat, "Beat note changed"),
         10 => tracing::info!(note = cfg.midi.notes.downbeat, "Downbeat note changed"),

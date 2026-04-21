@@ -56,6 +56,8 @@ struct ClockState {
     wait_beats_seen: u8,
     /// Last timing measurement timestamp processed from shared timing model.
     last_timing_received_at: Option<Instant>,
+    /// Beat edges since the last phase/bar realignment.
+    beats_since_realign: u8,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,6 +80,7 @@ impl ClockState {
             beat_count: 0,
             wait_beats_seen: 0,
             last_timing_received_at: None,
+            beats_since_realign: 0,
         }
     }
 
@@ -111,16 +114,19 @@ impl ClockState {
                 self.running = false;
                 self.waiting_for_downbeat = false;
                 self.wait_beats_seen = 0;
+                self.beats_since_realign = 0;
             }
             ClockTransportState::WaitingForDownbeat { wait_beats_seen } => {
                 self.running = false;
                 self.waiting_for_downbeat = true;
                 self.wait_beats_seen = wait_beats_seen;
+                self.beats_since_realign = 0;
             }
             ClockTransportState::Running => {
                 self.running = true;
                 self.waiting_for_downbeat = false;
                 self.wait_beats_seen = 0;
+                self.beats_since_realign = 0;
             }
         }
     }
@@ -200,7 +206,7 @@ fn handle_timing_snapshot(
     state: &SharedState,
     midi: &Arc<dyn MidiTransport>,
     activity: &Arc<Mutex<MidiActivity>>,
-    stable_beats: u8,
+    realign_interval_beats: u8,
     now: Instant,
 ) {
     let (master, snapshot) = {
@@ -247,10 +253,11 @@ fn handle_timing_snapshot(
         if is_beat_edge && beat_in_bar == 1
         {
             cs.wait_beats_seen = cs.wait_beats_seen.saturating_add(1);
-            let fallback_start = cs.wait_beats_seen >= stable_beats.max(1);
+            let fallback_start = cs.wait_beats_seen >= realign_interval_beats.max(1);
             if phrase_beat == 1 || fallback_start {
                 cs.transition_to_running();
                 cs.beat_count = 1;
+                cs.beats_since_realign = 0;
                 cs.has_started = true;
                 let _ = midi.send_message(&[MSG_START]);
                 if let Some(mut a) = activity.try_lock() {
@@ -269,8 +276,13 @@ fn handle_timing_snapshot(
             }
         }
     } else if cs.running && is_beat_edge {
-        if let Some(beat_at) = beat_at_from_measurement(cs, now, &measurement) {
-            apply_phase_correction(cs, beat_at);
+        cs.beats_since_realign = cs.beats_since_realign.saturating_add(1);
+        let realign_interval = realign_interval_beats.max(1);
+        if cs.beats_since_realign >= realign_interval {
+            if let Some(beat_at) = beat_at_from_measurement(cs, now, &measurement) {
+                apply_phase_correction(cs, beat_at);
+            }
+            cs.beats_since_realign = 0;
         }
         cs.beat_count = phrase_beat as u8;
     }
@@ -330,7 +342,7 @@ fn handle_beat_event(
     state: &SharedState,
     midi: &Arc<dyn MidiTransport>,
     activity: &Arc<Mutex<MidiActivity>>,
-    stable_beats: u8,
+    realign_interval_beats: u8,
     evt: BeatEvent,
 ) {
     let source = state.read().master.source;
@@ -370,10 +382,11 @@ fn handle_beat_event(
 
                 if cs.waiting_for_downbeat {
                     cs.wait_beats_seen = cs.wait_beats_seen.saturating_add(1);
-                let fallback_start = cs.wait_beats_seen >= stable_beats.max(1) && bp.beat_in_bar == 1;
+                let fallback_start = cs.wait_beats_seen >= realign_interval_beats.max(1) && bp.beat_in_bar == 1;
                 if is_phrase_start || fallback_start {
                     cs.transition_to_running();
                     cs.beat_count = 1;
+                    cs.beats_since_realign = 0;
                     cs.has_started = true;
                     let _ = midi.send_message(&[MSG_START]);
                         {
@@ -391,7 +404,12 @@ fn handle_beat_event(
                         cs.last_pulse = Instant::now();
                     }
                 } else if cs.running {
-                    apply_phase_correction(cs, Instant::now());
+                    cs.beats_since_realign = cs.beats_since_realign.saturating_add(1);
+                    let realign_interval = realign_interval_beats.max(1);
+                    if cs.beats_since_realign >= realign_interval {
+                        apply_phase_correction(cs, Instant::now());
+                        cs.beats_since_realign = 0;
+                    }
                     cs.beat_count = phrase_beat as u8;
                 }
             }
@@ -441,10 +459,11 @@ fn handle_beat_event(
 
             if cs.waiting_for_downbeat {
                 cs.wait_beats_seen = cs.wait_beats_seen.saturating_add(1);
-                let fallback_start = cs.wait_beats_seen >= stable_beats.max(1) && beat_in_bar == 1;
+                let fallback_start = cs.wait_beats_seen >= realign_interval_beats.max(1) && beat_in_bar == 1;
                 if is_phrase_start || fallback_start {
                     cs.transition_to_running();
                     cs.beat_count = 1;
+                    cs.beats_since_realign = 0;
                     cs.has_started = true;
                     let _ = midi.send_message(&[MSG_START]);
                         {
@@ -462,7 +481,12 @@ fn handle_beat_event(
                     cs.last_pulse = Instant::now();
                 }
             } else if cs.running {
-                apply_phase_correction(cs, Instant::now());
+                cs.beats_since_realign = cs.beats_since_realign.saturating_add(1);
+                let realign_interval = realign_interval_beats.max(1);
+                if cs.beats_since_realign >= realign_interval {
+                    apply_phase_correction(cs, Instant::now());
+                    cs.beats_since_realign = 0;
+                }
                 cs.beat_count = phrase_beat as u8;
             }
         }
@@ -477,12 +501,12 @@ fn drain_beat_events(
     state: &SharedState,
     midi: &Arc<dyn MidiTransport>,
     activity: &Arc<Mutex<MidiActivity>>,
-    stable_beats: u8,
+    realign_interval_beats: u8,
     beat_rx: &mut broadcast::Receiver<BeatEvent>,
 ) {
     loop {
         match beat_rx.try_recv() {
-            Ok(evt) => handle_beat_event(cs, state, midi, activity, stable_beats, evt),
+            Ok(evt) => handle_beat_event(cs, state, midi, activity, realign_interval_beats, evt),
             Err(_) => break,
         }
     }
@@ -538,7 +562,7 @@ fn handle_prolink_beat_loop_disabled(
     state: &SharedState,
     midi: &Arc<dyn MidiTransport>,
     activity: &Arc<Mutex<MidiActivity>>,
-    resync_every_beats: u8,
+    realign_interval_beats: u8,
     evt: BeatEvent,
 ) {
     let BeatEvent::Beat { packet: bp, received_at } = evt else {
@@ -559,7 +583,7 @@ fn handle_prolink_beat_loop_disabled(
 
     cs.set_bpm(bp.effective_bpm);
     cs.set_transport_state(ClockTransportState::Idle);
-    let resync_every = resync_every_beats.max(1);
+    let resync_every = realign_interval_beats.max(1);
 
     if cs.running {
         cs.beat_count = cs.beat_count.wrapping_add(1).max(1);
@@ -859,8 +883,10 @@ mod tests {
     use super::*;
     use crate::midi::test_utils::MockMidiTransport;
     use crate::state::BeatSource;
+    use crate::state::timing::{MeasurementKind, PlayingState, TimingMeasurement, TimingSource};
     use parking_lot::Mutex;
     use std::sync::Arc;
+    use std::time::Duration;
 
     fn make_test_state(device_number: u8, source: BeatSource) -> SharedState {
         let mut state = crate::state::DjState::new(30);
@@ -888,6 +914,22 @@ mod tests {
                 pitch_pct: 0.0,
             },
             received_at: Instant::now(),
+        }
+    }
+
+    fn make_timing_measurement(device: u8, beat_in_bar: u8) -> TimingMeasurement {
+        TimingMeasurement {
+            received_at: Instant::now(),
+            source: TimingSource::ProLink,
+            kind: MeasurementKind::ProLinkBeatPacket,
+            device_number: Some(device),
+            playing: PlayingState::Playing,
+            bpm: 120.0,
+            effective_bpm: 120.0,
+            beat_phase: Some(0.5),
+            bar_phase: Some(((beat_in_bar.saturating_sub(1)) as f64 + 0.5) / 4.0),
+            beat_in_bar: Some(beat_in_bar),
+            playhead_ms: None,
         }
     }
 
@@ -1028,6 +1070,53 @@ mod tests {
         let msgs = midi.get_messages();
         assert_eq!(msgs.len(), 3);
         assert!(msgs.iter().all(|m| m.as_slice() == [MSG_CLOCK]));
+    }
+
+    #[test]
+    fn timing_snapshot_realigns_only_at_configured_interval() {
+        let mut cs = ClockState::new();
+        cs.transition_to_running();
+        cs.pulse_index = 9;
+        cs.last_pulse = Instant::now()
+            .checked_sub(Duration::from_millis(20))
+            .unwrap_or(Instant::now());
+
+        let midi: Arc<dyn MidiTransport> = Arc::new(MockMidiTransport::new());
+        let activity = Arc::new(Mutex::new(MidiActivity::default()));
+        let state = make_test_state(1, BeatSource::ProLink);
+
+        for _ in 0..3 {
+            let measurement = make_timing_measurement(1, 2);
+            state.write().timing.observe(measurement.clone());
+            handle_timing_snapshot(&mut cs, &state, &midi, &activity, 4, Instant::now());
+            assert_eq!(cs.pulse_index, 9);
+            std::thread::sleep(Duration::from_millis(1));
+        }
+
+        let measurement = make_timing_measurement(1, 2);
+        state.write().timing.observe(measurement.clone());
+        handle_timing_snapshot(&mut cs, &state, &midi, &activity, 4, Instant::now());
+        assert_eq!(cs.pulse_index, 0);
+    }
+
+    #[test]
+    fn timing_snapshot_downbeat_does_not_bypass_interval() {
+        let mut cs = ClockState::new();
+        cs.transition_to_running();
+        cs.pulse_index = 11;
+        cs.last_pulse = Instant::now()
+            .checked_sub(Duration::from_millis(20))
+            .unwrap_or(Instant::now());
+
+        let midi: Arc<dyn MidiTransport> = Arc::new(MockMidiTransport::new());
+        let activity = Arc::new(Mutex::new(MidiActivity::default()));
+        let state = make_test_state(1, BeatSource::ProLink);
+
+        let measurement = make_timing_measurement(1, 1);
+        state.write().timing.observe(measurement.clone());
+        handle_timing_snapshot(&mut cs, &state, &midi, &activity, 8, Instant::now());
+
+        assert_eq!(cs.pulse_index, 11);
     }
 
 }
