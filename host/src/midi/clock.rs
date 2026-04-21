@@ -370,14 +370,12 @@ fn handle_beat_event(
 
                 if cs.waiting_for_downbeat {
                     cs.wait_beats_seen = cs.wait_beats_seen.saturating_add(1);
-                    let fallback_start = cs.wait_beats_seen >= stable_beats.max(1) && bp.beat_in_bar == 1;
-                    if is_phrase_start || fallback_start {
-                        cs.waiting_for_downbeat = false;
-                        cs.running = true;
-                        cs.beat_count = 1;
-                        cs.wait_beats_seen = 0;
-                        cs.has_started = true;
-                        let _ = midi.send_message(&[MSG_START]);
+                let fallback_start = cs.wait_beats_seen >= stable_beats.max(1) && bp.beat_in_bar == 1;
+                if is_phrase_start || fallback_start {
+                    cs.transition_to_running();
+                    cs.beat_count = 1;
+                    cs.has_started = true;
+                    let _ = midi.send_message(&[MSG_START]);
                         {
                             if let Some(mut a) = activity.try_lock() {
                                 a.clock_last_start_at = Some(Instant::now());
@@ -445,10 +443,8 @@ fn handle_beat_event(
                 cs.wait_beats_seen = cs.wait_beats_seen.saturating_add(1);
                 let fallback_start = cs.wait_beats_seen >= stable_beats.max(1) && beat_in_bar == 1;
                 if is_phrase_start || fallback_start {
-                    cs.waiting_for_downbeat = false;
-                    cs.running = true;
+                    cs.transition_to_running();
                     cs.beat_count = 1;
-                    cs.wait_beats_seen = 0;
                     cs.has_started = true;
                     let _ = midi.send_message(&[MSG_START]);
                         {
@@ -665,7 +661,7 @@ pub async fn run(
         tracing::info!("MIDI clock disabled in config");
     } else if !clock_loop_enabled {
         tracing::info!("MIDI clock loop disabled in config");
-        cs.waiting_for_downbeat = false;
+        cs.transition_to_idle();
     } else {
         cs.arm_wait_for_phrase_start();
     }
