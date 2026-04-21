@@ -571,4 +571,45 @@ mod tests {
         // Realtime should bypass most of queued normal traffic.
         assert!(rt_index < 10, "realtime message index was {rt_index}");
     }
+
+    #[tokio::test]
+    async fn realtime_priority_stays_tight_under_sustained_normal_flood() {
+        let sent = Arc::new(StdMutex::new(Vec::<Vec<u8>>::new()));
+        let conn: Box<dyn MidiOutConnection> = Box::new(RecordingConn::new(Arc::clone(&sent)));
+        let midi = MidiOutHandle::start(8192, Some(conn));
+
+        // Build a large normal backlog, then add many realtime ticks.
+        for i in 0u16..1200 {
+            let lo = (i & 0xff) as u8;
+            let hi = (i >> 8) as u8;
+            midi.send_message(&[0xB0, lo, hi])
+                .expect("normal send should enqueue");
+        }
+        for i in 0u8..96 {
+            midi.send_message(&[0xF8, i])
+                .expect("realtime send should enqueue");
+        }
+
+        midi.barrier().await;
+
+        let msgs = sent.lock().unwrap().clone();
+        let rt_indices: Vec<usize> = msgs
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, m)| (m.first().copied() == Some(0xF8)).then_some(idx))
+            .collect();
+
+        assert_eq!(rt_indices.len(), 96, "expected all realtime ticks sent");
+        let worst_rt_index = *rt_indices
+            .iter()
+            .max()
+            .expect("at least one realtime index exists");
+
+        // Under sustained flood, realtime ticks must still surface near the front
+        // instead of sinking behind the full normal backlog.
+        assert!(
+            worst_rt_index < 300,
+            "realtime ticks drifted too deep into backlog (worst index {worst_rt_index})"
+        );
+    }
 }
