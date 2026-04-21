@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use crate::link::run as link_run;
 use super::TaskContext;
+use crate::link::run as link_run;
 
 pub fn spawn(ctx: TaskContext, startup_cfg: crate::config::Config) {
     let link_cfg = startup_cfg.link.clone();

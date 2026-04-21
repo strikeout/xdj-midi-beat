@@ -65,15 +65,13 @@ pub async fn run(ctx: AppContext, use_tui: bool) -> anyhow::Result<()> {
     let status_rx2 = status_tx.subscribe();
     let device_rx = device_tx.subscribe();
 
-    let midi_activity: Arc<Mutex<MidiActivity>> =
-        Arc::new(Mutex::new(MidiActivity::default()));
+    let midi_activity: Arc<Mutex<MidiActivity>> = Arc::new(Mutex::new(MidiActivity::default()));
     let (cfg_change_tx, cfg_change_rx) = watch::channel(());
     let (timing_tx, timing_rx) = watch::channel(());
 
-    let initial_conn = midi_conn
-        .lock()
-        .take()
-        .map(|c| Box::new(crate::midi::MidirOutConnection(c)) as Box<dyn crate::midi::MidiOutConnection>);
+    let initial_conn = midi_conn.lock().take().map(|c| {
+        Box::new(crate::midi::MidirOutConnection(c)) as Box<dyn crate::midi::MidiOutConnection>
+    });
 
     // Bounded queue: producers must never block on MIDI output.
     let midi_out = crate::midi::MidiOutHandle::start(2048, initial_conn);

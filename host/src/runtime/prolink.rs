@@ -1,13 +1,9 @@
 use std::sync::Arc;
 
-use crate::prolink::discovery::DeviceTable;
 use super::TaskContext;
+use crate::prolink::discovery::DeviceTable;
 
-pub fn spawn(
-    ctx: &TaskContext,
-    startup_cfg: crate::config::Config,
-    device_table: DeviceTable,
-) {
+pub fn spawn(ctx: &TaskContext, startup_cfg: crate::config::Config, device_table: DeviceTable) {
     let TaskContext {
         dj_state: _,
         cfg: _,
@@ -47,7 +43,8 @@ pub fn spawn(
             vcdj_table,
             vcdj_ready_tx,
         )
-        .await {
+        .await
+        {
             tracing::error!("Virtual CDJ task error: {e}");
         }
     });
@@ -71,12 +68,9 @@ pub fn spawn(
             }
         };
 
-        if let Err(e) = crate::prolink::status_listener::run(
-            bind_ip,
-            ready.device_number,
-            status_tx2,
-        )
-        .await {
+        if let Err(e) =
+            crate::prolink::status_listener::run(bind_ip, ready.device_number, status_tx2).await
+        {
             tracing::error!("Status listener error: {e}");
         }
     });
@@ -90,12 +84,15 @@ pub fn spawn(
     });
     let track_tx = ctx.track_change_tx.clone();
     tokio::spawn(async move {
-        track_tx.send(crate::state::TrackChange {
-            device_number: 0,
-            track_source_player: 0,
-            track_slot: 0,
-            track_type: 0,
-            rekordbox_id: 0,
-        }).await.ok();
+        track_tx
+            .send(crate::state::TrackChange {
+                device_number: 0,
+                track_source_player: 0,
+                track_slot: 0,
+                track_type: 0,
+                rekordbox_id: 0,
+            })
+            .await
+            .ok();
     });
 }

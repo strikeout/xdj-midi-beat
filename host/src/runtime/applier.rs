@@ -3,10 +3,10 @@ use std::sync::Arc;
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 
+use super::TaskContext;
 use crate::prolink::beat_listener::BeatEvent;
 use crate::prolink::status_listener::StatusEvent;
 use crate::state::TrackChange;
-use super::TaskContext;
 
 pub fn spawn(
     ctx: TaskContext,
@@ -18,7 +18,12 @@ pub fn spawn(
     let cfg = Arc::clone(&ctx.cfg);
     let timing_tx = ctx.timing_tx.clone();
 
-    tokio::spawn(beat_applier(dj_state.clone(), cfg.clone(), beat_rx, timing_tx.clone()));
+    tokio::spawn(beat_applier(
+        dj_state.clone(),
+        cfg.clone(),
+        beat_rx,
+        timing_tx.clone(),
+    ));
 
     tokio::spawn(status_applier(dj_state, cfg, status_rx, track_change_tx));
 }
